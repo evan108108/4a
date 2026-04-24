@@ -1,0 +1,67 @@
+{
+  "@context": {
+    "@version": 1.1,
+    "@protected": true,
+
+    "schema": "https://schema.org/",
+    "prov": "http://www.w3.org/ns/prov#",
+    "fa": "https://4a4ai.com/ns/v0#",
+    "xsd": "http://www.w3.org/2001/XMLSchema#",
+
+    "Observation": "schema:Observation",
+    "Claim": "schema:Claim",
+    "Thing": "schema:Thing",
+    "Person": "schema:Person",
+    "Organization": "schema:Organization",
+    "Place": "schema:Place",
+    "CreativeWork": "schema:CreativeWork",
+    "SoftwareSourceCode": "schema:SoftwareSourceCode",
+    "Role": "schema:Role",
+    "Agent": "prov:Agent",
+    "Activity": "prov:Activity",
+
+    "agent": { "@id": "schema:agent", "@type": "@id" },
+    "author": { "@id": "schema:author", "@type": "@id" },
+    "name": "schema:name",
+    "description": "schema:description",
+    "about": { "@id": "schema:about", "@type": "@id" },
+    "value": "schema:value",
+    "url": { "@id": "schema:url", "@type": "@id" },
+
+    "observationDate": { "@id": "schema:observationDate", "@type": "xsd:dateTime" },
+    "datePublished": { "@id": "schema:datePublished", "@type": "xsd:date" },
+    "dateCreated": { "@id": "schema:dateCreated", "@type": "xsd:dateTime" },
+    "dateModified": { "@id": "schema:dateModified", "@type": "xsd:dateTime" },
+    "startDate": { "@id": "schema:startDate", "@type": "xsd:date" },
+    "endDate": { "@id": "schema:endDate", "@type": "xsd:date" },
+
+    "measuredProperty": "schema:measuredProperty",
+    "observationAbout": { "@id": "schema:observationAbout", "@type": "@id" },
+    "appearance": "schema:appearance",
+    "citation": { "@id": "schema:citation", "@type": "@id", "@container": "@set" },
+
+    "knows": { "@id": "schema:knows", "@type": "@id" },
+    "codeRepository": { "@id": "schema:codeRepository", "@type": "@id" },
+    "programmingLanguage": "schema:programmingLanguage",
+    "memberOf": { "@id": "schema:memberOf", "@type": "@id" },
+    "sameAs": { "@id": "schema:sameAs", "@type": "@id", "@container": "@set" },
+
+    "roleName": "schema:roleName",
+    "subject": { "@id": "schema:subject", "@type": "@id" },
+    "object": { "@id": "schema:object", "@type": "@id" },
+
+    "wasDerivedFrom": { "@id": "prov:wasDerivedFrom", "@type": "@id", "@container": "@set" },
+    "wasGeneratedBy": { "@id": "prov:wasGeneratedBy", "@type": "@id" },
+    "wasAttributedTo": { "@id": "prov:wasAttributedTo", "@type": "@id" },
+    "wasInformedBy": { "@id": "prov:wasInformedBy", "@type": "@id" },
+
+    "signature": "fa:signature",
+    "pubkey": "fa:pubkey",
+    "blake3": "fa:blake3",
+    "pinnedTo": { "@id": "fa:pinnedTo", "@type": "@id" },
+    "kind": { "@id": "fa:kind", "@type": "xsd:integer" },
+    "relay": { "@id": "fa:relay", "@type": "@id", "@container": "@set" },
+    "topic": { "@id": "fa:topic", "@container": "@set" },
+    "rotation": { "@id": "fa:rotation", "@type": "xsd:integer" }
+  }
+}
