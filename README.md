@@ -277,7 +277,7 @@ The event envelope is designed so future bridges to AT Protocol records, EAS off
 
 ## License and credits
 
-**License:** TBD — MIT or Apache 2.0 for the specification and reference code. Content published to the network is owned by its publishers; 4A has no rights over it.
+**License:** [Apache License 2.0](./LICENSE) for the specification and reference code. The Apache license includes an explicit patent grant, which matters more than usual for a convention that wants broad industry adoption without fear of downstream patent claims on event shapes or namespaces. Content published to the network is owned by its publishers; 4A has no rights over it.
 
 **Credits:**
 
