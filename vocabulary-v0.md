@@ -25,7 +25,7 @@ Why not the alternatives:
 
 ```json
 {
-  "@context": "https://4a4ai.com/ns/v0",
+  "@context": "https://4a4.ai/ns/v0",
   "@type": "Observation",
   "@id": "4a://obs/bk-QmExample...",
   "agent": {"@type": "Agent", "@id": "npub1..."},
@@ -41,7 +41,7 @@ Why not the alternatives:
 
 ```json
 {
-  "@context": "https://4a4ai.com/ns/v0",
+  "@context": "https://4a4.ai/ns/v0",
   "@type": "Claim",
   "@id": "4a://claim/bk-QmExample...",
   "author": {"@id": "npub1..."},
@@ -56,7 +56,7 @@ Why not the alternatives:
 
 ```json
 {
-  "@context": "https://4a4ai.com/ns/v0",
+  "@context": "https://4a4.ai/ns/v0",
   "@type": ["Thing", "SoftwareSourceCode"],
   "@id": "https://github.com/vercel/next.js",
   "name": "Next.js",
@@ -75,7 +75,7 @@ Lightweight (embed as property):
 Reified (needs provenance on the relation itself):
 ```json
 {
-  "@context": "https://4a4ai.com/ns/v0",
+  "@context": "https://4a4.ai/ns/v0",
   "@type": "Role",
   "@id": "4a://rel/bk-QmExample...",
   "roleName": "maintainer",
@@ -88,12 +88,12 @@ Reified (needs provenance on the relation itself):
 
 ## Default `@context`
 
-Ship a **single hosted URL**: `https://4a4ai.com/ns/v0` — a static JSON-LD context document that imports Schema.org, adds the PROV-O terms we use, and defines the 4A-specific extensions below. Consumers cache once; publishers stay terse. Context is **version-pinned** (the `/v0` in the path); new terms ship as `/v1` without breaking old payloads. Operators who can't fetch remote contexts MAY inline the equivalent object — the expanded form is byte-identical.
+Ship a **single hosted URL**: `https://4a4.ai/ns/v0` — a static JSON-LD context document that imports Schema.org, adds the PROV-O terms we use, and defines the 4A-specific extensions below. Consumers cache once; publishers stay terse. Context is **version-pinned** (the `/v0` in the path); new terms ship as `/v1` without breaking old payloads. Operators who can't fetch remote contexts MAY inline the equivalent object — the expanded form is byte-identical.
 
 ## Extended vs. borrowed
 
 **Taken verbatim:** `@type`, `@id`, `Observation`, `Claim`, `Thing`, `Role`, `Person`, `Organization`, `Place`, `CreativeWork`, `SoftwareSourceCode`, `agent`, `author`, `name`, `about`, `value`, `observationDate`, `measuredProperty`, `observationAbout`, `appearance`, `citation`, `datePublished`, `startDate`, `endDate`, `knows`, `codeRepository`. All from Schema.org. Plus `prov:Agent`, `prov:wasDerivedFrom`, `prov:wasGeneratedBy`, `prov:wasAttributedTo` from [PROV-O](https://www.w3.org/TR/prov-o/).
 
-**4A-specific (`fa:` prefix → `https://4a4ai.com/ns/v0#`):** `signature` (secp256k1 sig over canonical JSON), `pubkey` (hex secp256k1 pubkey), `blake3` (payload CID), `pinnedTo` (Arweave tx ID if pinned), `kind` (Nostr event kind integer), `relay` (hint URLs where a consumer is likely to find the object). These have no existing vocabulary equivalent and are wire-level, not semantic.
+**4A-specific (`fa:` prefix → `https://4a4.ai/ns/v0#`):** `signature` (secp256k1 sig over canonical JSON), `pubkey` (hex secp256k1 pubkey), `blake3` (payload CID), `pinnedTo` (Arweave tx ID if pinned), `kind` (Nostr event kind integer), `relay` (hint URLs where a consumer is likely to find the object). These have no existing vocabulary equivalent and are wire-level, not semantic.
 
 That's it. Everything else is Schema.org.

@@ -5,7 +5,7 @@
 
     "schema": "https://schema.org/",
     "prov": "http://www.w3.org/ns/prov#",
-    "fa": "https://4a4ai.com/ns/v0#",
+    "fa": "https://4a4.ai/ns/v0#",
     "xsd": "http://www.w3.org/2001/XMLSchema#",
 
     "Observation": "schema:Observation",

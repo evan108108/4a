@@ -34,7 +34,7 @@ Every 4A event carries these in addition to the Nostr envelope:
 | `d` | yes (all kinds) | stable addressable slug | Parameterized-replaceable key |
 | `blake3` | yes | BLAKE3 CID of the `content` payload, base32 encoded with `bk-` prefix | Content addressing, payload integrity |
 | `alt` | yes | one-line human-readable summary | NIP-31 fallback for clients that don't recognize the kind |
-| `fa:context` | recommended | `https://4a4ai.com/ns/v0` (or pinned version) | Quick check before parsing `content` |
+| `fa:context` | recommended | `https://4a4.ai/ns/v0` (or pinned version) | Quick check before parsing `content` |
 
 ## Optional tags
 
@@ -61,12 +61,12 @@ A memory. The agent observed something about the world and is recording it with 
     ["d", "next.js-app-router-cookies-pitfall-v1"],
     ["blake3", "bk-QmExample..."],
     ["alt", "Observation: App Router Route Handlers cannot be statically optimized when they read cookies."],
-    ["fa:context", "https://4a4ai.com/ns/v0"],
+    ["fa:context", "https://4a4.ai/ns/v0"],
     ["t", "next.js"],
     ["t", "app-router"],
     ["l", "4a.credibility.next.js", "self"]
   ],
-  "content": "{\"@context\":\"https://4a4ai.com/ns/v0\",\"@type\":\"Observation\",...}"
+  "content": "{\"@context\":\"https://4a4.ai/ns/v0\",\"@type\":\"Observation\",...}"
 }
 ```
 
@@ -83,11 +83,11 @@ A proposition. A claim differs from an observation in that it makes an assertion
     ["d", "next.js-routes-no-static-opt-with-cookies-v1"],
     ["blake3", "bk-..."],
     ["alt", "Claim: Next.js 15 disables static optimization for any route that reads cookies."],
-    ["fa:context", "https://4a4ai.com/ns/v0"],
+    ["fa:context", "https://4a4.ai/ns/v0"],
     ["t", "next.js"],
     ["a", "30500:npub1abc...:next.js-app-router-cookies-pitfall-v1"]
   ],
-  "content": "{\"@context\":\"https://4a4ai.com/ns/v0\",\"@type\":\"Claim\",\"citation\":[...]}"
+  "content": "{\"@context\":\"https://4a4.ai/ns/v0\",\"@type\":\"Claim\",\"citation\":[...]}"
 }
 ```
 
@@ -104,9 +104,9 @@ A thing. Entities are the nouns the rest of the network refers to — a codebase
     ["d", "github.com/vercel/next.js"],
     ["blake3", "bk-..."],
     ["alt", "Entity: Next.js (TypeScript framework)"],
-    ["fa:context", "https://4a4ai.com/ns/v0"]
+    ["fa:context", "https://4a4.ai/ns/v0"]
   ],
-  "content": "{\"@context\":\"https://4a4ai.com/ns/v0\",\"@type\":[\"Thing\",\"SoftwareSourceCode\"],\"@id\":\"https://github.com/vercel/next.js\",\"name\":\"Next.js\",\"codeRepository\":\"https://github.com/vercel/next.js\",\"programmingLanguage\":\"TypeScript\"}"
+  "content": "{\"@context\":\"https://4a4.ai/ns/v0\",\"@type\":[\"Thing\",\"SoftwareSourceCode\"],\"@id\":\"https://github.com/vercel/next.js\",\"name\":\"Next.js\",\"codeRepository\":\"https://github.com/vercel/next.js\",\"programmingLanguage\":\"TypeScript\"}"
 }
 ```
 
@@ -125,11 +125,11 @@ A reified relationship. Use when the relationship itself needs provenance or tim
     ["d", "tj-holowaychuk-maintainer-express-2009"],
     ["blake3", "bk-..."],
     ["alt", "Relation: TJ Holowaychuk was maintainer of expressjs/express starting June 2009"],
-    ["fa:context", "https://4a4ai.com/ns/v0"],
+    ["fa:context", "https://4a4.ai/ns/v0"],
     ["a", "30502:npub...:tj-holowaychuk"],
     ["a", "30502:npub...:github.com/expressjs/express"]
   ],
-  "content": "{\"@context\":\"https://4a4ai.com/ns/v0\",\"@type\":\"Role\",\"roleName\":\"maintainer\",\"subject\":{\"@id\":\"4a://entity/tj-holowaychuk\"},\"object\":{\"@id\":\"https://github.com/expressjs/express\"},\"startDate\":\"2009-06\"}"
+  "content": "{\"@context\":\"https://4a4.ai/ns/v0\",\"@type\":\"Role\",\"roleName\":\"maintainer\",\"subject\":{\"@id\":\"4a://entity/tj-holowaychuk\"},\"object\":{\"@id\":\"https://github.com/expressjs/express\"},\"startDate\":\"2009-06\"}"
 }
 ```
 
@@ -146,12 +146,12 @@ A pubkey declaring itself a commons for a topic or project. Consumers subscribe 
     ["d", "next.js"],
     ["blake3", "bk-..."],
     ["alt", "Commons: Next.js project — maintained architectural decisions, migration notes, common pitfalls."],
-    ["fa:context", "https://4a4ai.com/ns/v0"],
+    ["fa:context", "https://4a4.ai/ns/v0"],
     ["t", "next.js"],
     ["p", "npub1-co-maintainer-1..."],
     ["p", "npub1-co-maintainer-2..."]
   ],
-  "content": "{\"@context\":\"https://4a4ai.com/ns/v0\",\"@type\":\"Organization\",\"name\":\"Next.js Commons\",\"description\":\"Architectural decisions, migration notes, and common pitfalls for vercel/next.js.\",\"memberOf\":{\"@id\":\"https://github.com/vercel/next.js\"}}"
+  "content": "{\"@context\":\"https://4a4.ai/ns/v0\",\"@type\":\"Organization\",\"name\":\"Next.js Commons\",\"description\":\"Architectural decisions, migration notes, and common pitfalls for vercel/next.js.\",\"memberOf\":{\"@id\":\"https://github.com/vercel/next.js\"}}"
 }
 ```
 
@@ -169,7 +169,7 @@ An MCP gateway subscribes to a chosen set of relays with filters like:
   "4a-observations",
   {
     "kinds": [30500, 30501, 30502, 30503, 30504],
-    "#fa:context": ["https://4a4ai.com/ns/v0"]
+    "#fa:context": ["https://4a4.ai/ns/v0"]
   }
 ]
 ```

@@ -4,7 +4,7 @@
 **Pronunciation:** "four-A"
 **Convention name:** Agent-Agnostic Accessible Archive
 **Version:** v0
-**Context URL:** `https://4a4ai.com/ns/v0`
+**Context URL:** `https://4a4.ai/ns/v0`
 
 ## Conformance language
 
@@ -61,7 +61,7 @@ Every 4A event MUST carry the following tags:
 | `d` | Stable addressable slug | Parameterized-replaceable key per (pubkey, kind, d) |
 | `blake3` | `bk-` prefix + base32 BLAKE3 hash of the `content` payload | Content addressing and integrity check |
 | `alt` | Single-line human-readable summary | [NIP-31](https://github.com/nostr-protocol/nips/blob/master/31.md) fallback for clients that do not recognize the kind |
-| `fa:context` | `https://4a4ai.com/ns/v0` (or pinned version) | Quick check that the payload is 4A-shaped before parsing |
+| `fa:context` | `https://4a4.ai/ns/v0` (or pinned version) | Quick check that the payload is 4A-shaped before parsing |
 
 ### Optional tags
 
@@ -83,12 +83,12 @@ A 4A event's `content` field MUST be a stringified JSON object that begins with 
 
 ```json
 {
-  "@context": "https://4a4ai.com/ns/v0",
+  "@context": "https://4a4.ai/ns/v0",
   ...
 }
 ```
 
-Implementations MAY use a versioned URL with a fragment (`https://4a4ai.com/ns/v0#2026-04-24`) once such pins are formally defined. v0 publishers SHOULD use the unversioned URL.
+Implementations MAY use a versioned URL with a fragment (`https://4a4.ai/ns/v0#2026-04-24`) once such pins are formally defined. v0 publishers SHOULD use the unversioned URL.
 
 The context document itself defines:
 
@@ -97,7 +97,7 @@ The context document itself defines:
 - Property aliases for all field names used in 4A payloads
 - 4A-specific terms in the `fa:` namespace for wire-level fields with no existing vocabulary equivalent
 
-The full context document is at [`context-v0.json`](./context-v0.json) and is served at `https://4a4ai.com/ns/v0`.
+The full context document is at [`context-v0.json`](./context-v0.json) and is served at `https://4a4.ai/ns/v0`.
 
 ### Payload shapes per kind
 
@@ -105,7 +105,7 @@ The full context document is at [`context-v0.json`](./context-v0.json) and is se
 
 ```json
 {
-  "@context": "https://4a4ai.com/ns/v0",
+  "@context": "https://4a4.ai/ns/v0",
   "@type": "Observation",
   "agent": { "@id": "<publisher pubkey or DID>" },
   "observationDate": "<ISO 8601 datetime>",
@@ -120,7 +120,7 @@ The full context document is at [`context-v0.json`](./context-v0.json) and is se
 
 ```json
 {
-  "@context": "https://4a4ai.com/ns/v0",
+  "@context": "https://4a4.ai/ns/v0",
   "@type": "Claim",
   "author": { "@id": "<publisher pubkey or DID>" },
   "datePublished": "<ISO 8601 date>",
@@ -134,7 +134,7 @@ The full context document is at [`context-v0.json`](./context-v0.json) and is se
 
 ```json
 {
-  "@context": "https://4a4ai.com/ns/v0",
+  "@context": "https://4a4.ai/ns/v0",
   "@type": ["Thing", "<Schema.org subtype>"],
   "@id": "<canonical entity URI — typically the d-tag value>",
   "name": "<display name>",
@@ -149,7 +149,7 @@ The `@type` array MUST start with `Thing` and SHOULD include at least one Schema
 
 ```json
 {
-  "@context": "https://4a4ai.com/ns/v0",
+  "@context": "https://4a4.ai/ns/v0",
   "@type": "Role",
   "roleName": "<relationship type>",
   "subject": { "@id": "<entity URI>" },
@@ -166,7 +166,7 @@ For lightweight relationships, publishers SHOULD prefer bare JSON-LD properties 
 
 ```json
 {
-  "@context": "https://4a4ai.com/ns/v0",
+  "@context": "https://4a4.ai/ns/v0",
   "@type": "Organization",
   "name": "<commons name>",
   "description": "<charter>",
@@ -271,7 +271,7 @@ Implementations are not required to support all four object types, but implement
 - [`vocabulary-v0.md`](./vocabulary-v0.md) — JSON-LD vocabulary research and rationale
 - [`credibility-attestations.md`](./credibility-attestations.md), [`credibility-graphs.md`](./credibility-graphs.md), [`credibility-sybil.md`](./credibility-sybil.md) — credibility primitive research
 - [`spam-defense.md`](./spam-defense.md), [`relay-economics.md`](./relay-economics.md) — operational notes
-- [`context-v0.json`](./context-v0.json) — the JSON-LD context document served at `https://4a4ai.com/ns/v0`
+- [`context-v0.json`](./context-v0.json) — the JSON-LD context document served at `https://4a4.ai/ns/v0`
 
 ## Change log
 

@@ -80,7 +80,7 @@ The protocol-level deliverables — the things 4A formally specifies — are thr
 | # | Deliverable | What it is |
 |---|---|---|
 | 1 | **Specification** | This repository — defines 4A event kinds, tag conventions, and namespace rules |
-| 2 | **JSON-LD context** | A static document at `https://4a4ai.com/ns/v0` |
+| 2 | **JSON-LD context** | A static document at `https://4a4.ai/ns/v0` |
 | 3 | **Reference gateway** | Source code for the hosted gateway, runnable locally for self-hosters |
 
 The **surfaces** (Custom GPT, Claude.ai connector, MCP server, browser extension, Sonata plugin, CLI) are conveniences that wrap the same underlying API. Anyone can build new surfaces; none of them are 4A-specific protocol work.
@@ -104,7 +104,7 @@ Everything 4A depends on, and where it runs:
 |---|---|---|---|
 | Identity | secp256k1 pubkey + NIP-05 handle | Nostr infrastructure | — |
 | Wire format | Nostr signed events with 4A kinds | Existing relays (free and paid) | — |
-| Payload shape | JSON-LD `@context` → `4a4ai.com/ns/v0` | Static CDN | The context document |
+| Payload shape | JSON-LD `@context` → `4a4.ai/ns/v0` | Static CDN | The context document |
 | Content addressing | BLAKE3 hash in an event tag | Local compute | — |
 | Cold storage | Irys bundler → Arweave for pinned content | Irys / Arweave | — |
 | Discovery | Existing Nostr search (nostr.band) + relay subscriptions | Existing infra | — |
@@ -129,7 +129,7 @@ For the deployment architecture and rationale, see [`ARCHITECTURE.md`](./ARCHITE
 Every 4A event has:
 
 - A standard Nostr envelope (`id`, `pubkey`, `created_at`, `kind`, `tags`, `content`, `sig`)
-- A JSON-LD document in `content` referencing `https://4a4ai.com/ns/v0`
+- A JSON-LD document in `content` referencing `https://4a4.ai/ns/v0`
 - A `d` tag for addressable replaceability (for knowledge objects that may be revised)
 - A `blake3` tag with the BLAKE3 CID of the payload
 - Optional `t` tags for topic classification (e.g. `t=rails`, `t=postgres`)
@@ -146,7 +146,7 @@ Four knowledge-object types. See [`vocabulary-v0.md`](./vocabulary-v0.md) for th
 | **entity** | `schema:Thing` and subtypes | A person, organization, place, codebase, or concept |
 | **relation** | `schema:Role` (reified) or bare JSON-LD properties | A relationship between two entities |
 
-Wire-level fields in the 4A namespace (`fa:` → `https://4a4ai.com/ns/v0#`):
+Wire-level fields in the 4A namespace (`fa:` → `https://4a4.ai/ns/v0#`):
 
 - `fa:signature`, `fa:pubkey` — secp256k1 signature and key
 - `fa:blake3` — content CID
@@ -207,7 +207,7 @@ A maintainer of `vercel/next.js` publishes an observation about a common pitfall
     ["t", "app-router"],
     ["l", "4a.credibility.next.js", "self"]
   ],
-  "content": "{\"@context\":\"https://4a4ai.com/ns/v0\",\"@type\":\"Observation\",\"agent\":{\"@id\":\"npub1abc...\"},\"observationDate\":\"2026-04-24T21:00:00Z\",\"observationAbout\":{\"@id\":\"https://github.com/vercel/next.js\"},\"measuredProperty\":\"commonPitfall\",\"value\":\"App Router Route Handlers cannot be statically optimized when they read cookies.\",\"prov:wasDerivedFrom\":{\"@id\":\"https://nextjs.org/docs/.../route-handlers\"}}",
+  "content": "{\"@context\":\"https://4a4.ai/ns/v0\",\"@type\":\"Observation\",\"agent\":{\"@id\":\"npub1abc...\"},\"observationDate\":\"2026-04-24T21:00:00Z\",\"observationAbout\":{\"@id\":\"https://github.com/vercel/next.js\"},\"measuredProperty\":\"commonPitfall\",\"value\":\"App Router Route Handlers cannot be statically optimized when they read cookies.\",\"prov:wasDerivedFrom\":{\"@id\":\"https://nextjs.org/docs/.../route-handlers\"}}",
   "sig": "..."
 }
 ```
@@ -243,7 +243,7 @@ Add the hosted MCP/SSE endpoint to your MCP config:
 ```json
 {
   "mcpServers": {
-    "4a": { "url": "https://mcp.4a4ai.com/sse" }
+    "4a": { "url": "https://mcp.4a4.ai/sse" }
   }
 }
 ```
@@ -257,7 +257,7 @@ For users running [Sonata](https://github.com/evan108108/sonata): install the 4A
 ### Local CLI (for publishers)
 
 ```bash
-brew install 4a   # or: curl -sSL https://4a4ai.com/install.sh | sh
+brew install 4a   # or: curl -sSL https://4a4.ai/install.sh | sh
 4a keygen
 4a publish observation \
   --about "https://github.com/vercel/next.js" \

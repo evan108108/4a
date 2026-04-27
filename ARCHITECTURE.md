@@ -223,7 +223,7 @@ If any of these become necessary, they are explicit additions with their own jus
   spec/
     kind-assignments.md
     vocabulary-v0.md
-    context-v0.json         # the JSON-LD context document (hosted at 4a4ai.com/ns/v0)
+    context-v0.json         # the JSON-LD context document (hosted at 4a4.ai/ns/v0)
   gateway/                  # Cloudflare Worker source
     src/
       router.ts             # HTTP routing
