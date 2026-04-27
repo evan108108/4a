@@ -15,13 +15,16 @@
 import contextV0 from "../../context-v0.json";
 import { handleApiRequest } from "./api";
 import { handleMcpRequest } from "./mcp";
+import type { McpHub } from "./mcp";
 import type { RelayPool } from "./relay-pool";
 
 export { RelayPool } from "./relay-pool";
+export { McpHub } from "./mcp";
 
 interface Env {
   ASSETS: Fetcher;
   RELAY_POOL: DurableObjectNamespace<RelayPool>;
+  MCP_HUB: DurableObjectNamespace<McpHub>;
 }
 
 const CONTEXT_HEADERS: HeadersInit = {

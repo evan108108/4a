@@ -9,15 +9,18 @@
 //                                        202 Accepted; the response is delivered over
 //                                        the matching SSE stream.
 //
-// Session state lives in a module-scope Map. Sessions evaporate when the Worker
-// isolate rotates; clients reconnect by reopening /sse.
+// Sessions live in a singleton McpHub Durable Object so that the GET /sse and
+// POST /messages requests — which the CF runtime may route to different worker
+// isolates — see the same in-memory session map.
 
+import { DurableObject } from "cloudflare:workers";
 import pkg from "../../package.json";
 import { handleCredibility, normalizePubkey } from "./credibility";
 import type { NostrEvent, QueryFilter, RelayPool } from "./relay-pool";
 
 interface McpEnv {
   RELAY_POOL: DurableObjectNamespace<RelayPool>;
+  MCP_HUB: DurableObjectNamespace<McpHub>;
 }
 
 const SERVER_NAME = "4a-gateway";
@@ -76,7 +79,7 @@ interface Session {
   heartbeat: ReturnType<typeof setInterval>;
 }
 
-const sessions = new Map<string, Session>();
+// Sessions live on the McpHub DO instance below — no module-scope storage.
 
 interface ToolDef {
   name: string;
@@ -375,101 +378,6 @@ function sseFrame(eventName: string | null, data: string): string {
   return out;
 }
 
-function closeSession(sessionId: string): void {
-  const s = sessions.get(sessionId);
-  if (!s) return;
-  sessions.delete(sessionId);
-  clearInterval(s.heartbeat);
-  try {
-    s.writer.close();
-  } catch {
-    /* already closed */
-  }
-}
-
-async function emit(session: Session, payload: unknown): Promise<void> {
-  try {
-    await session.writer.write(
-      session.encoder.encode(sseFrame("message", JSON.stringify(payload))),
-    );
-  } catch {
-    /* writer closed; the heartbeat error path will reap it */
-  }
-}
-
-async function handleSseOpen(request: Request): Promise<Response> {
-  const sessionId = newSessionId();
-  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
-  const writer = writable.getWriter();
-  const encoder = new TextEncoder();
-
-  const endpointPath = `/messages?sessionId=${sessionId}`;
-  await writer.write(encoder.encode(sseFrame("endpoint", endpointPath)));
-
-  const heartbeat = setInterval(() => {
-    writer.write(encoder.encode(`: heartbeat\n\n`)).catch(() => closeSession(sessionId));
-  }, HEARTBEAT_MS);
-
-  sessions.set(sessionId, { writer, encoder, heartbeat });
-
-  request.signal.addEventListener("abort", () => closeSession(sessionId));
-
-  return new Response(readable, {
-    status: 200,
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-      "X-Accel-Buffering": "no",
-      ...CORS_HEADERS,
-    },
-  });
-}
-
-async function handleSseMessage(request: Request, env: McpEnv): Promise<Response> {
-  const url = new URL(request.url);
-  const sessionId = url.searchParams.get("sessionId");
-  if (!sessionId) {
-    return jsonResponse({ error: "bad_request", message: "sessionId query parameter required" }, 400);
-  }
-  const session = sessions.get(sessionId);
-  if (!session) {
-    return jsonResponse(
-      { error: "not_found", message: "no such session — reconnect via GET /sse" },
-      404,
-    );
-  }
-
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    await emit(session, jsonRpcFailure(null, { code: PARSE_ERROR, message: "invalid JSON" }));
-    return new Response(null, { status: 202, headers: CORS_HEADERS });
-  }
-
-  const messages = Array.isArray(body) ? body : [body];
-  for (const raw of messages) {
-    if (
-      !raw ||
-      typeof raw !== "object" ||
-      (raw as { jsonrpc?: unknown }).jsonrpc !== "2.0" ||
-      typeof (raw as { method?: unknown }).method !== "string"
-    ) {
-      const id = (raw as { id?: unknown } | null)?.id ?? null;
-      await emit(
-        session,
-        jsonRpcFailure(id, { code: INVALID_REQUEST, message: "malformed JSON-RPC envelope" }),
-      );
-      continue;
-    }
-    const response = await dispatch(raw as JsonRpcRequest, env);
-    if (response !== null) await emit(session, response);
-  }
-
-  return new Response(null, { status: 202, headers: CORS_HEADERS });
-}
-
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -480,27 +388,147 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-export async function handleMcpRequest(request: Request, env: McpEnv): Promise<Response> {
-  if (request.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: CORS_HEADERS });
+// McpHub Durable Object — singleton (id "main") that owns all live SSE
+// sessions for the worker. The worker forwards every mcp.4a4.ai/* request
+// here so the GET /sse and POST /messages handlers see the same in-memory
+// session map regardless of which edge isolate first received the request.
+export class McpHub extends DurableObject<McpEnv> {
+  private sessions = new Map<string, Session>();
+
+  override async fetch(request: Request): Promise<Response> {
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    if (path === "/sse" && request.method === "GET") return this.handleOpen(request);
+    if (path === "/messages" && request.method === "POST") return this.handleMessage(request);
+    if ((path === "/" || path === "/health") && request.method === "GET") {
+      return jsonResponse({
+        name: SERVER_NAME,
+        version: SERVER_VERSION,
+        transport: "sse",
+        protocolVersion: PROTOCOL_VERSION,
+        endpoints: { sse: "/sse", messages: "/messages?sessionId=<id>" },
+        tools: TOOLS.map((t) => t.name),
+        liveSessions: this.sessions.size,
+      });
+    }
+    return jsonResponse({ error: "not_found", message: `unknown path: ${path}` }, 404);
   }
 
-  const url = new URL(request.url);
-  const path = url.pathname;
+  private closeSession(sessionId: string): void {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    this.sessions.delete(sessionId);
+    clearInterval(s.heartbeat);
+    try {
+      s.writer.close();
+    } catch {
+      /* already closed */
+    }
+  }
 
-  if (path === "/sse" && request.method === "GET") return handleSseOpen(request);
-  if (path === "/messages" && request.method === "POST") return handleSseMessage(request, env);
+  private async emit(session: Session, payload: unknown): Promise<void> {
+    try {
+      await session.writer.write(
+        session.encoder.encode(sseFrame("message", JSON.stringify(payload))),
+      );
+    } catch {
+      /* writer closed; reaped on next heartbeat */
+    }
+  }
 
-  if ((path === "/" || path === "/health") && request.method === "GET") {
-    return jsonResponse({
-      name: SERVER_NAME,
-      version: SERVER_VERSION,
-      transport: "sse",
-      protocolVersion: PROTOCOL_VERSION,
-      endpoints: { sse: "/sse", messages: "/messages?sessionId=<id>" },
-      tools: TOOLS.map((t) => t.name),
+  private handleOpen(request: Request): Response {
+    const sessionId = newSessionId();
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = writable.getWriter();
+    const encoder = new TextEncoder();
+
+    const heartbeat = setInterval(() => {
+      writer
+        .write(encoder.encode(`: heartbeat\n\n`))
+        .catch(() => this.closeSession(sessionId));
+    }, HEARTBEAT_MS);
+
+    this.sessions.set(sessionId, { writer, encoder, heartbeat });
+
+    // Fire-and-forget — awaiting before returning the Response would deadlock
+    // because the readable side isn't being consumed yet.
+    const endpointPath = `/messages?sessionId=${sessionId}`;
+    writer
+      .write(encoder.encode(sseFrame("endpoint", endpointPath)))
+      .catch(() => this.closeSession(sessionId));
+
+    if (request.signal) {
+      request.signal.addEventListener("abort", () => this.closeSession(sessionId));
+    }
+
+    return new Response(readable, {
+      status: 200,
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+        ...CORS_HEADERS,
+      },
     });
   }
 
-  return jsonResponse({ error: "not_found", message: `unknown path: ${path}` }, 404);
+  private async handleMessage(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const sessionId = url.searchParams.get("sessionId");
+    if (!sessionId) {
+      return jsonResponse(
+        { error: "bad_request", message: "sessionId query parameter required" },
+        400,
+      );
+    }
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return jsonResponse(
+        { error: "not_found", message: "no such session — reconnect via GET /sse" },
+        404,
+      );
+    }
+
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      await this.emit(session, jsonRpcFailure(null, { code: PARSE_ERROR, message: "invalid JSON" }));
+      return new Response(null, { status: 202, headers: CORS_HEADERS });
+    }
+
+    const messages = Array.isArray(body) ? body : [body];
+    for (const raw of messages) {
+      if (
+        !raw ||
+        typeof raw !== "object" ||
+        (raw as { jsonrpc?: unknown }).jsonrpc !== "2.0" ||
+        typeof (raw as { method?: unknown }).method !== "string"
+      ) {
+        const id = (raw as { id?: unknown } | null)?.id ?? null;
+        await this.emit(
+          session,
+          jsonRpcFailure(id, { code: INVALID_REQUEST, message: "malformed JSON-RPC envelope" }),
+        );
+        continue;
+      }
+      const response = await dispatch(raw as JsonRpcRequest, this.env);
+      if (response !== null) await this.emit(session, response);
+    }
+
+    return new Response(null, { status: 202, headers: CORS_HEADERS });
+  }
 }
+
+export function handleMcpRequest(request: Request, env: McpEnv): Promise<Response> {
+  // Forward every mcp.4a4.ai/* request to the singleton McpHub DO so SSE
+  // session state survives across worker isolates.
+  const stub = env.MCP_HUB.get(env.MCP_HUB.idFromName("main"));
+  return stub.fetch(request);
+}
+

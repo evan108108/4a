@@ -45,6 +45,17 @@ zone_name = "4a4.ai"
 name = "RELAY_POOL"
 class_name = "RelayPool"
 
+# MCP/SSE session hub. Singleton (id "main") so the GET /sse and POST /messages
+# requests for a given session always reach the same in-memory map even when
+# CF routes them to different worker isolates.
+[[durable_objects.bindings]]
+name = "MCP_HUB"
+class_name = "McpHub"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RelayPool"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["McpHub"]
