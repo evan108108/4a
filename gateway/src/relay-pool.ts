@@ -15,7 +15,7 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { blake3 } from "@noble/hashes/blake3.js";
 
-const RELAYS = [
+export const RELAYS = [
   "wss://relay.damus.io",
   "wss://nos.lol",
   "wss://nostr.wine",
@@ -152,6 +152,12 @@ export class RelayPool extends DurableObject<unknown> {
     await this.ensureConnected();
     const list = await this.ctx.storage.list<NostrEvent>({ prefix: COMMONS_PREFIX });
     return Array.from(list.values());
+  }
+
+  async stats(): Promise<{ relays: readonly string[]; eventCount: number }> {
+    await this.ensureConnected();
+    const list = await this.ctx.storage.list({ prefix: EVENT_PREFIX });
+    return { relays: RELAYS, eventCount: list.size };
   }
 
   async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {

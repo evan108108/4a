@@ -1,11 +1,11 @@
 // 4A gateway — single Worker handling all routes on 4a4.ai and its subdomains.
 //
-// v0 scope (Day 2 + 2.5):
+// v0 scope:
 //   - GET /ns/v0           → JSON-LD context document (immutable, custom headers)
 //   - HEAD /ns/v0          → headers-only variant
 //   - OPTIONS /ns/v0       → CORS preflight
-//   - api.4a4.ai/*         → 503 placeholder (Day 3+)
-//   - mcp.4a4.ai/*         → 503 placeholder (Day 3+)
+//   - api.4a4.ai/v0/*      → public read API (Day 3 / Task 2)
+//   - mcp.4a4.ai/*         → 503 placeholder (Day 3 / Task 4)
 //   - everything else on   → static site served from env.ASSETS
 //     the apex
 //
@@ -13,12 +13,14 @@
 // and lives in gateway/dist/site/. The build runs before every deploy.
 
 import contextV0 from "../../context-v0.json";
+import { handleApiRequest } from "./api";
+import type { RelayPool } from "./relay-pool";
 
 export { RelayPool } from "./relay-pool";
 
 interface Env {
   ASSETS: Fetcher;
-  RELAY_POOL: DurableObjectNamespace;
+  RELAY_POOL: DurableObjectNamespace<RelayPool>;
 }
 
 const CONTEXT_HEADERS: HeadersInit = {
@@ -41,12 +43,15 @@ export default {
     const method = request.method;
     const host = url.hostname;
 
-    // Subdomain placeholders — Day 3+ work.
-    if (host === "api.4a4.ai" || host === "mcp.4a4.ai") {
+    if (host === "api.4a4.ai") {
+      return handleApiRequest(request, env);
+    }
+
+    if (host === "mcp.4a4.ai") {
       return new Response(
         JSON.stringify({
           error: "not_yet_implemented",
-          message: `${host} is reserved for the 4A gateway and is not live yet.`,
+          message: `${host} is reserved for the 4A MCP/SSE adapter and is not live yet.`,
           docs: "https://4a4.ai/architecture",
         }),
         {
