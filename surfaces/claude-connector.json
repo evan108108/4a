@@ -1,0 +1,59 @@
+{
+  "$comment": "Project metadata for the 4A Claude.ai Remote MCP connector. As of 2026-04, Claude.ai has no published manifest schema — paid users install custom connectors by pasting `mcpServerUrl` into Settings → Connectors → Add custom connector. This file documents the connector for the project, future Anthropic directory submission, and user-facing docs at /surfaces/claude-connector. Field names mirror the directory-listing fields (name, description, mcpServerUrl, iconUrl, categories, support) that Anthropic has been collecting from third-party connectors.",
+  "schemaVersion": "0",
+  "name": "4A — Agent-Agnostic Accessible Archive",
+  "shortName": "4A",
+  "description": "Read access to the 4A network — a public, agent-readable archive of Nostr-signed JSON-LD knowledge objects (observations, claims, entities, relations, and Commons declarations) about software, organizations, people, and concepts.",
+  "mcpServerUrl": "https://mcp.4a4.ai/sse",
+  "transport": "sse",
+  "protocolVersion": "2024-11-05",
+  "iconUrl": "https://4a4.ai/favicon.svg",
+  "homepageUrl": "https://4a4.ai/",
+  "documentationUrl": "https://4a4.ai/surfaces/claude-connector/",
+  "privacyPolicyUrl": "https://4a4.ai/",
+  "supportUrl": "https://github.com/evan108108/4a/issues",
+  "categories": ["knowledge", "developer-tools"],
+  "auth": {
+    "type": "none",
+    "note": "v0 read API is public; no OAuth required."
+  },
+  "tools": [
+    {
+      "name": "query_4a",
+      "summary": "Search the archive by subject, kind, topic, or author."
+    },
+    {
+      "name": "get_4a_object",
+      "summary": "Fetch a single addressable 4A object by (kind, pubkey, d)."
+    },
+    {
+      "name": "get_credibility",
+      "summary": "Look up NIP-85 trusted-assertion scores for a publisher pubkey."
+    },
+    {
+      "name": "list_commons",
+      "summary": "List every Commons declaration the gateway has indexed."
+    }
+  ],
+  "permissions": {
+    "readOnly": ["query_4a", "get_4a_object", "get_credibility", "list_commons"],
+    "writeOrDelete": []
+  },
+  "examplePrompts": [
+    "What does 4A know about the Nostr protocol?",
+    "List the Commons declarations on 4A.",
+    "Look up credibility scores for npub1...",
+    "Fetch 4A entity 30502:<pubkey>:4a-protocol."
+  ],
+  "publisher": {
+    "name": "4A project",
+    "url": "https://4a4.ai/",
+    "verified": false
+  },
+  "license": "MIT",
+  "todo": [
+    "Add a verified publisher record once Anthropic ships connector verification.",
+    "Replace `privacyPolicyUrl` with a dedicated /privacy page in v0.1.",
+    "Add a screenshot URL once a directory listing requires one."
+  ]
+}
