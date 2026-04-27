@@ -17,6 +17,7 @@ import { handleApiRequest } from "./api";
 import { handleAuthRequest } from "./auth";
 import { handleMcpRequest } from "./mcp";
 import type { McpHub } from "./mcp";
+import { handlePublishRequest } from "./publish";
 import type { RelayPool } from "./relay-pool";
 
 export { RelayPool } from "./relay-pool";
@@ -29,6 +30,10 @@ interface Env {
   JWT_SIGNING_KEY?: string;
   GITHUB_OAUTH_CLIENT_ID?: string;
   GITHUB_OAUTH_CLIENT_SECRET?: string;
+  AWS_ACCESS_KEY_ID: string;
+  AWS_SECRET_ACCESS_KEY: string;
+  AWS_REGION: string;
+  KMS_DERIVATION_KEY_ID: string;
 }
 
 const CONTEXT_HEADERS: HeadersInit = {
@@ -54,6 +59,9 @@ export default {
     if (host === "api.4a4.ai") {
       if (url.pathname.startsWith("/auth/")) {
         return handleAuthRequest(request, env);
+      }
+      if (url.pathname.startsWith("/v0/publish/") || url.pathname === "/v0/attest") {
+        return handlePublishRequest(request, env);
       }
       return handleApiRequest(request, env);
     }
