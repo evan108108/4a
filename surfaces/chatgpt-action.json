@@ -979,6 +979,7 @@
         "description": "Per-relay outcome from the publish fan-out.",
         "required": [
           "relay",
+          "status",
           "accepted"
         ],
         "properties": {
@@ -989,9 +990,18 @@
               "wss://relay.damus.io"
             ]
           },
+          "status": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "rate-limited-retrying",
+              "failed-permanent"
+            ],
+            "description": "Outcome of the publish to this relay. `accepted` = relay returned OK true (or was a duplicate). `rate-limited-retrying` = transient failure (rate-limit, auth-required, socket hangup, timeout); the gateway's retry queue will re-attempt with exponential backoff (max 4 attempts). `failed-permanent` = relay rejected for content reasons (invalid, blocked, pow); no retry."
+          },
           "accepted": {
             "type": "boolean",
-            "description": "True if the relay returned an OK acknowledgment for the event."
+            "description": "True iff status === \"accepted\". Provided for backward compatibility with v0 clients; new code should branch on `status` instead."
           },
           "message": {
             "type": "string",
@@ -1056,7 +1066,7 @@
           },
           "relayResults": {
             "type": "array",
-            "description": "Per-relay acknowledgment outcomes. At least one entry has accepted=true.",
+            "description": "Per-relay acknowledgment outcomes. At least one entry has status=\"accepted\". Entries with status=\"rate-limited-retrying\" will be retried by the gateway in the background and do not require action by the caller.",
             "items": {
               "$ref": "#/components/schemas/RelayResult"
             }

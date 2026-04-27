@@ -22,9 +22,11 @@ import {
   type KmsEnv,
   type SignedEvent,
 } from "./kms";
-import { RELAYS } from "./relay-pool";
+import { classifyRejection, RELAYS, type RelayPool } from "./relay-pool";
 
-export type PublishEnv = AuthEnv & KmsEnv;
+export type PublishEnv = AuthEnv & KmsEnv & {
+  RELAY_POOL: DurableObjectNamespace<RelayPool>;
+};
 
 const CONTEXT_URL = "https://4a4.ai/ns/v0";
 const MAX_CONTENT_BYTES = 10 * 1024;
@@ -128,8 +130,25 @@ function rateLimitCheck(key: string): { ok: true } | { ok: false; retryAfterMs: 
 
 // ─── relay fan-out ──────────────────────────────────────────────────────────
 
+// Three-way status reflecting partial-success states surfaced to API callers
+// and downstream MCP/ChatGPT tools.
+//
+//   "accepted"               — relay returned [OK, id, true, ...] OR the
+//                              "duplicate:" prefix (already had the event).
+//   "rate-limited-retrying"  — transient: rate-limited, auth-required, socket
+//                              hangup, or timeout. The DO retry queue will
+//                              re-attempt with exponential backoff (max 4).
+//   "failed-permanent"       — relay rejected for content reasons (invalid,
+//                              blocked, pow). No retry — would never succeed.
+export type RelayStatus =
+  | "accepted"
+  | "rate-limited-retrying"
+  | "failed-permanent";
+
 interface RelayResult {
   relay: string;
+  status: RelayStatus;
+  // Backward-compat with v0 OpenAPI consumers: true iff status === "accepted".
   accepted: boolean;
   message?: string;
 }
@@ -140,12 +159,24 @@ async function publishToRelay(relay: string, event: SignedEvent): Promise<RelayR
   try {
     const response = await fetch(httpUrl, { headers: { Upgrade: "websocket" } });
     ws = response.webSocket;
-    if (!ws) return { relay, accepted: false, message: "relay did not upgrade to WebSocket" };
+    if (!ws) {
+      return {
+        relay,
+        status: "rate-limited-retrying",
+        accepted: false,
+        message: "relay did not upgrade to WebSocket",
+      };
+    }
     ws.accept();
 
     const result = await new Promise<RelayResult>((resolve) => {
       const timer = setTimeout(() => {
-        resolve({ relay, accepted: false, message: "timeout waiting for OK" });
+        resolve({
+          relay,
+          status: "rate-limited-retrying",
+          accepted: false,
+          message: "timeout waiting for OK",
+        });
       }, RELAY_OK_TIMEOUT_MS);
 
       ws!.addEventListener("message", (ev) => {
@@ -153,9 +184,15 @@ async function publishToRelay(relay: string, event: SignedEvent): Promise<RelayR
           const msg = JSON.parse(typeof ev.data === "string" ? ev.data : "");
           if (Array.isArray(msg) && msg[0] === "OK" && msg[1] === event.id) {
             clearTimeout(timer);
-            const accepted = msg[2] === true;
-            const message = typeof msg[3] === "string" ? msg[3] : undefined;
-            resolve({ relay, accepted, ...(message ? { message } : {}) });
+            const ok = msg[2] === true;
+            const message = typeof msg[3] === "string" ? msg[3] : "";
+            const status: RelayStatus = ok ? "accepted" : classifyRejection(message);
+            resolve({
+              relay,
+              status,
+              accepted: status === "accepted",
+              ...(message ? { message } : {}),
+            });
           }
         } catch {
           // ignore non-JSON / unrelated frames
@@ -163,18 +200,33 @@ async function publishToRelay(relay: string, event: SignedEvent): Promise<RelayR
       });
       ws!.addEventListener("close", () => {
         clearTimeout(timer);
-        resolve({ relay, accepted: false, message: "socket closed before OK" });
+        resolve({
+          relay,
+          status: "rate-limited-retrying",
+          accepted: false,
+          message: "socket closed before OK",
+        });
       });
       ws!.addEventListener("error", () => {
         clearTimeout(timer);
-        resolve({ relay, accepted: false, message: "socket error" });
+        resolve({
+          relay,
+          status: "rate-limited-retrying",
+          accepted: false,
+          message: "socket error",
+        });
       });
 
       ws!.send(JSON.stringify(["EVENT", event]));
     });
     return result;
   } catch (err) {
-    return { relay, accepted: false, message: err instanceof Error ? err.message : String(err) };
+    return {
+      relay,
+      status: "rate-limited-retrying",
+      accepted: false,
+      message: err instanceof Error ? err.message : String(err),
+    };
   } finally {
     try { ws?.close(); } catch { /* noop */ }
   }
@@ -540,7 +592,28 @@ export async function runPublish(
 
     const signed: SignedEvent = await signEventWithDerivedKey(built.template, identity, env);
     const relayResults = await fanOut(signed);
-    const accepted = relayResults.filter((r) => r.accepted).length;
+    const accepted = relayResults.filter((r) => r.status === "accepted").length;
+
+    // Enqueue any rate-limited-retrying relays on the DO so the alarm-driven
+    // retry queue takes over. Don't await — the DO call is fire-and-forget;
+    // a failure to enqueue must not break the publish response. No-op when
+    // there's nothing to retry.
+    const retryRelays = relayResults
+      .filter((r) => r.status === "rate-limited-retrying")
+      .map((r) => r.relay);
+    if (retryRelays.length > 0) {
+      try {
+        const id = env.RELAY_POOL.idFromName("main");
+        const stub = env.RELAY_POOL.get(id);
+        // Pass the SignedEvent as a plain NostrEvent — the DO re-validates id+sig.
+        await stub.enqueueRetry(signed, retryRelays);
+      } catch {
+        // Retry-queue failures must not propagate. We've already accepted on
+        // ≥1 relay (or returned 502 below); the read path is the source of
+        // truth for whether the event reached the network.
+      }
+    }
+
     if (accepted === 0) {
       return {
         ok: false,

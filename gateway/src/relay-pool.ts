@@ -23,10 +23,19 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { blake3 } from "@noble/hashes/blake3.js";
 
+// Default relay set (2026-04-27 hardening). nostr.wine dropped — paid relay,
+// requires admission payment + restricted_writes:true (NIP-11 confirmed
+// payment_required:true). Six free, write-friendly strfry relays selected
+// from a probe of 8 candidates; all accepted a 5-event burst from a fresh
+// pubkey at 100% on first attempt. Snort and nostr.band were timing out
+// during the probe; nsec.app only supports NIPs 1/9/46 (bunker-only).
 export const RELAYS = [
   "wss://relay.damus.io",
   "wss://nos.lol",
-  "wss://nostr.wine",
+  "wss://nostr.mom",
+  "wss://relay.primal.net",
+  "wss://offchain.pub",
+  "wss://nostr.bitcoiner.social",
 ] as const;
 
 const KINDS_4A = [30500, 30501, 30502, 30503, 30504] as const;
@@ -37,9 +46,20 @@ const RECONNECT_MAX_MS = 60_000;
 const REPLAY_WINDOW_S = 15 * 60;
 const REPLAY_TIMEOUT_MS = 5_000;
 
+// Retry-with-backoff for rate-limited/transient publish failures.
+// Base 5s, doubling, cap 5min, max 4 retries → ~5s, 10s, 20s, 40s elapsed
+// (cumulative ~75s) before we give up. ±25% jitter to spread load when
+// many events are queued at once.
+const RETRY_BASE_MS = 5_000;
+const RETRY_MAX_MS = 5 * 60 * 1000;
+const RETRY_MAX_ATTEMPTS = 4;
+const RETRY_JITTER = 0.25;
+const RETRY_PUBLISH_TIMEOUT_MS = 5_000;
+
 const EVENT_PREFIX = "event:";
 const COMMONS_PREFIX = "event:30504:";
 const RECONNECT_PREFIX = "reconnect:";
+const RETRY_PREFIX = "retry:";
 
 export interface NostrEvent {
   id: string;
@@ -57,6 +77,12 @@ export interface QueryFilter {
   topic?: string;
   author?: string;
   limit?: number;
+}
+
+interface RetryRecord {
+  event: NostrEvent;
+  attempts: number;
+  nextAttemptAt: number;
 }
 
 const BASE32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
@@ -129,6 +155,36 @@ function relayHttpUrl(wssUrl: string): string {
   return wssUrl.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
 }
 
+// Exponential backoff with ±RETRY_JITTER multiplicative noise.
+function jitteredBackoff(attempts: number): number {
+  const base = Math.min(RETRY_BASE_MS * 2 ** attempts, RETRY_MAX_MS);
+  const noise = 1 + (Math.random() * 2 - 1) * RETRY_JITTER;
+  return Math.round(base * noise);
+}
+
+// Classify an OK-false rejection message. Per NIP-01 §4.B, prefixes like
+// "rate-limited:", "auth-required:", "restricted:" indicate transient or
+// auth-related errors that *might* succeed later. "duplicate:" is the relay
+// telling us it already has the event — treat as accepted. Everything else
+// (invalid:, pow:, blocked:, error: signature issues, etc.) is permanent.
+export function classifyRejection(
+  message: string,
+): "accepted" | "rate-limited-retrying" | "failed-permanent" {
+  const m = message.toLowerCase();
+  if (m.startsWith("duplicate:")) return "accepted";
+  if (
+    m.startsWith("rate-limited:") ||
+    m.startsWith("rate-limit:") ||
+    m.startsWith("auth-required:") ||
+    m.startsWith("restricted:") ||
+    m.includes("rate limit") ||
+    m.includes("try again")
+  ) {
+    return "rate-limited-retrying";
+  }
+  return "failed-permanent";
+}
+
 export class RelayPool extends DurableObject<unknown> {
   // Live outbound WebSockets keyed by relay URL. CF keeps the DO instance in
   // memory while any of these are open, so this Map survives between requests.
@@ -178,12 +234,14 @@ export class RelayPool extends DurableObject<unknown> {
   }
 
   // Backstop sweep — called every 5 minutes from the worker's scheduled()
-  // handler. Reopens any dropped subscriptions and replays the last
+  // handler. Reopens any dropped subscriptions, replays the last
   // REPLAY_WINDOW_S seconds of events from each relay so anything that was
-  // missed by a silently-dead live WS gets recovered.
+  // missed by a silently-dead live WS gets recovered, and processes any
+  // due retries in the publish-side retry queue.
   async sweepFromRelays(): Promise<{
     relaysQueried: number;
     eventsBackfilled: number;
+    retriesProcessed: number;
   }> {
     await this.ensureConnected();
     const sinceUnix = Math.floor(Date.now() / 1000) - REPLAY_WINDOW_S;
@@ -195,11 +253,158 @@ export class RelayPool extends DurableObject<unknown> {
         // per-relay failures must not block other relays
       }
     }
-    return { relaysQueried: RELAYS.length, eventsBackfilled: backfilled };
+    const retriesProcessed = await this.processRetries();
+    return {
+      relaysQueried: RELAYS.length,
+      eventsBackfilled: backfilled,
+      retriesProcessed,
+    };
+  }
+
+  // Enqueue rate-limited/transient publish failures for later retry. Called
+  // from publish.ts after fan-out completes. Stores one record per (event,
+  // relay) pair keyed by `retry:<eventId>:<relay>` so multiple events stack
+  // independently. The next alarm fires at the soonest nextAttemptAt.
+  async enqueueRetry(event: NostrEvent, relays: string[]): Promise<void> {
+    if (relays.length === 0) return;
+    if (!isValidEvent(event)) return;
+    if (canonicalEventId(event) !== event.id) return;
+    const now = Date.now();
+    let earliest = Infinity;
+    for (const relay of relays) {
+      if (!RELAYS.includes(relay as (typeof RELAYS)[number])) continue;
+      const key = `${RETRY_PREFIX}${event.id}:${relay}`;
+      // Don't re-queue if an attempt is already pending for this pair.
+      const existing = await this.ctx.storage.get<RetryRecord>(key);
+      if (existing) continue;
+      const nextAttemptAt = now + jitteredBackoff(0);
+      await this.ctx.storage.put(key, { event, attempts: 0, nextAttemptAt });
+      if (nextAttemptAt < earliest) earliest = nextAttemptAt;
+    }
+    if (earliest !== Infinity) {
+      const current = await this.ctx.storage.getAlarm();
+      if (current == null || current > earliest) {
+        await this.ctx.storage.setAlarm(earliest);
+      }
+    }
   }
 
   async alarm(): Promise<void> {
+    // Order matters: process retries first (uses fresh outbound sockets),
+    // then make sure ingest subscriptions are healthy.
+    await this.processRetries();
     await this.ensureConnected();
+  }
+
+  // Walk the retry queue, attempting any record whose nextAttemptAt has
+  // arrived. Returns the count of records processed (regardless of outcome).
+  // Surviving records (still scheduled in the future, or re-queued for next
+  // attempt) reschedule the alarm to their soonest nextAttemptAt. Caps the
+  // batch at 50 to keep a single alarm tick bounded.
+  private async processRetries(): Promise<number> {
+    const now = Date.now();
+    const list = await this.ctx.storage.list<RetryRecord>({
+      prefix: RETRY_PREFIX,
+      limit: 50,
+    });
+
+    let processed = 0;
+    let earliest = Infinity;
+
+    for (const [key, record] of list.entries()) {
+      if (record.nextAttemptAt > now) {
+        if (record.nextAttemptAt < earliest) earliest = record.nextAttemptAt;
+        continue;
+      }
+      const relay = key.slice(RETRY_PREFIX.length + record.event.id.length + 1);
+      processed++;
+
+      const outcome = await this.publishOnce(relay, record.event);
+      if (outcome === "accepted" || outcome === "failed-permanent") {
+        await this.ctx.storage.delete(key);
+        continue;
+      }
+      // transient: bump attempt count and reschedule (or give up)
+      const nextAttempts = record.attempts + 1;
+      if (nextAttempts >= RETRY_MAX_ATTEMPTS) {
+        await this.ctx.storage.delete(key);
+        continue;
+      }
+      const nextAttemptAt = now + jitteredBackoff(nextAttempts);
+      await this.ctx.storage.put(key, {
+        event: record.event,
+        attempts: nextAttempts,
+        nextAttemptAt,
+      });
+      if (nextAttemptAt < earliest) earliest = nextAttemptAt;
+    }
+
+    if (earliest !== Infinity) {
+      const current = await this.ctx.storage.getAlarm();
+      if (current == null || current > earliest) {
+        await this.ctx.storage.setAlarm(earliest);
+      }
+    }
+    return processed;
+  }
+
+  // Fresh-socket single-event publish, used by the retry queue. Mirrors the
+  // shape of publish.ts:publishToRelay but lives inside the DO so we don't
+  // need to plumb a worker-side helper through. Returns one of three
+  // outcomes; the caller decides whether to delete or reschedule.
+  private async publishOnce(
+    relay: string,
+    event: NostrEvent,
+  ): Promise<"accepted" | "rate-limited-retrying" | "failed-permanent"> {
+    let ws: WebSocket | null = null;
+    try {
+      const response = await fetch(relayHttpUrl(relay), {
+        headers: { Upgrade: "websocket" },
+      });
+      ws = response.webSocket;
+      if (!ws) return "rate-limited-retrying";
+      ws.accept();
+
+      return await new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          try {
+            ws?.close();
+          } catch {}
+          resolve("rate-limited-retrying");
+        }, RETRY_PUBLISH_TIMEOUT_MS);
+
+        ws!.addEventListener("message", (ev: MessageEvent) => {
+          try {
+            const data = JSON.parse(typeof ev.data === "string" ? ev.data : "");
+            if (Array.isArray(data) && data[0] === "OK" && data[1] === event.id) {
+              clearTimeout(timer);
+              const accepted = data[2] === true;
+              const message = typeof data[3] === "string" ? data[3] : "";
+              if (accepted) return resolve("accepted");
+              return resolve(classifyRejection(message));
+            }
+          } catch {
+            // ignore non-JSON / unrelated frames
+          }
+        });
+        ws!.addEventListener("close", () => {
+          clearTimeout(timer);
+          resolve("rate-limited-retrying");
+        });
+        ws!.addEventListener("error", () => {
+          clearTimeout(timer);
+          resolve("rate-limited-retrying");
+        });
+
+        ws!.send(JSON.stringify(["EVENT", event]));
+      });
+    } catch {
+      return "rate-limited-retrying";
+    } finally {
+      try {
+        ws?.close();
+      } catch {}
+    }
   }
 
   private async ensureConnected(): Promise<void> {
