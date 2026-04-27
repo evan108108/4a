@@ -37,3 +37,14 @@ zone_name = "4a4.ai"
 [[routes]]
 pattern = "api.4a4.ai/*"
 zone_name = "4a4.ai"
+
+# Durable Object: holds outbound WS subscriptions to Nostr relays and stores
+# verified 4A events keyed by addressable triple kind:pubkey:d.
+# Read endpoints (Task 2) will look up RELAY_POOL via env binding.
+[[durable_objects.bindings]]
+name = "RELAY_POOL"
+class_name = "RelayPool"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayPool"]

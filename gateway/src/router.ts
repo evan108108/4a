@@ -14,8 +14,11 @@
 
 import contextV0 from "../../context-v0.json";
 
+export { RelayPool } from "./relay-pool";
+
 interface Env {
   ASSETS: Fetcher;
+  RELAY_POOL: DurableObjectNamespace;
 }
 
 const CONTEXT_HEADERS: HeadersInit = {
