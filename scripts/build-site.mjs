@@ -16,7 +16,7 @@
 //   gateway/dist/site/robots.txt
 //   gateway/dist/site/.well-known/agent.json   (A2A Agent Card)
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, readdirSync, copyFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { marked } from "marked";
@@ -838,7 +838,19 @@ function build() {
   writeFile("robots.txt", buildRobotsTxt());
   writeFile(".well-known/agent.json", JSON.stringify(buildAgentCard(), null, 2));
 
-  console.log(`built ${PAGES.length} pages → ${SITE_DIR}`);
+  const surfacesSrc = join(REPO_ROOT, "surfaces");
+  const surfacesOut = join(SITE_DIR, "surfaces");
+  let surfacesCopied = 0;
+  if (existsSync(surfacesSrc)) {
+    ensureDir(surfacesOut);
+    for (const name of readdirSync(surfacesSrc)) {
+      if (!/\.(json|md)$/.test(name)) continue;
+      copyFileSync(join(surfacesSrc, name), join(surfacesOut, name));
+      surfacesCopied++;
+    }
+  }
+
+  console.log(`built ${PAGES.length} pages + ${surfacesCopied} surfaces → ${SITE_DIR}`);
 }
 
 build();

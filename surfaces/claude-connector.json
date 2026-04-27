@@ -9,7 +9,7 @@
   "protocolVersion": "2024-11-05",
   "iconUrl": "https://4a4.ai/favicon.svg",
   "homepageUrl": "https://4a4.ai/",
-  "documentationUrl": "https://4a4.ai/surfaces/claude-connector/",
+  "documentationUrl": "https://github.com/evan108108/4a/blob/main/surfaces/claude-connector.md",
   "privacyPolicyUrl": "https://4a4.ai/",
   "supportUrl": "https://github.com/evan108108/4a/issues",
   "categories": ["knowledge", "developer-tools"],
