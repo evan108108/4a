@@ -5,3 +5,6 @@ dist/
 build/
 .env
 .env.local
+
+# Local-only scripts (underscore-prefixed); keep KMS smoke tests out of git
+scripts/_*
