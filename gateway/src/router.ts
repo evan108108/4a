@@ -14,6 +14,7 @@
 
 import contextV0 from "../../context-v0.json";
 import { handleApiRequest } from "./api";
+import { handleAuthRequest } from "./auth";
 import { handleMcpRequest } from "./mcp";
 import type { McpHub } from "./mcp";
 import type { RelayPool } from "./relay-pool";
@@ -25,6 +26,9 @@ interface Env {
   ASSETS: Fetcher;
   RELAY_POOL: DurableObjectNamespace<RelayPool>;
   MCP_HUB: DurableObjectNamespace<McpHub>;
+  JWT_SIGNING_KEY?: string;
+  GITHUB_OAUTH_CLIENT_ID?: string;
+  GITHUB_OAUTH_CLIENT_SECRET?: string;
 }
 
 const CONTEXT_HEADERS: HeadersInit = {
@@ -48,6 +52,9 @@ export default {
     const host = url.hostname;
 
     if (host === "api.4a4.ai") {
+      if (url.pathname.startsWith("/auth/")) {
+        return handleAuthRequest(request, env);
+      }
       return handleApiRequest(request, env);
     }
 

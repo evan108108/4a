@@ -255,6 +255,28 @@ If any of these become necessary, they are explicit additions with their own jus
 - **OAuth provider expansion.** GitHub-only at v0; Google and Apple are obvious additions but not necessary for the engineer audience the OSS-commons wedge targets.
 - **NIP-46 timeout handling.** If a user's bunker is offline, signing requests time out. UX needs a clear failure mode (queued retry vs immediate failure).
 
+## Phase 2 secrets and env vars
+
+The Phase 2 OAuth + JWT module reads three values from the Worker env. None of
+them go in `.env` (which is for local wrangler/Cloudflare auth only) — they
+are deployed via `wrangler secret put` so they live in Cloudflare's secret
+store, not the repo:
+
+- `GITHUB_OAUTH_CLIENT_ID` — public client id from the OAuth app registered at
+  <https://github.com/settings/developers>. The app's Authorization callback
+  URL must be `https://api.4a4.ai/auth/github/callback`.
+- `GITHUB_OAUTH_CLIENT_SECRET` — confidential secret from the same OAuth app.
+- `JWT_SIGNING_KEY` — HS256 signing secret for tokens minted on successful
+  callback. Generate once with `openssl rand -base64 32` and persist via
+  `wrangler secret put JWT_SIGNING_KEY`. The same secret is used to sign the
+  short-lived OAuth `state` parameter (HMAC over `nonce.expiry`).
+
+The KMS-related variables (`AWS_*`, `KMS_DERIVATION_KEY_ID`) come online with
+the KMS signing module — see the Phase 2 AWS setup runbook.
+
 ## Change log
 
+- 2026-04-27 — Phase 2 / 2: OAuth + JWT module landed in `gateway/src/auth.ts`.
+  GitHub provider only in v0; HS256 JWT (24h) for publish-endpoint auth. New
+  secrets documented above and in `.env.example`.
 - 2026-04-24 — Initial architecture document. Cloudflare Workers + Durable Objects for compute; AWS KMS for HMAC-based deterministic key derivation; no database; two-phase rollout (read-everywhere + write-locally first, custodial publishing second).
