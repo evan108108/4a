@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+#
+# 4A wrangler wrapper.
+#
+# Sources /Users/evan/projects/4a/.env so wrangler talks to the dedicated 4A
+# Cloudflare account, never the Enginable account. The OAuth session stored
+# in ~/.config/.wrangler/ is therefore never touched by this project.
+#
+# Usage: bin/wrangler <wrangler-args...>
+#
+set -euo pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="$PROJECT_ROOT/.env"
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "error: $ENV_FILE not found" >&2
+  echo "       copy .env.example to .env and fill in your CF credentials" >&2
+  exit 1
+fi
+
+# Load env vars without echoing secrets.
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
+
+# Sanity check: at least one auth mode must be set.
+if [[ -z "${CLOUDFLARE_API_TOKEN:-}" && -z "${CLOUDFLARE_API_KEY:-}" ]]; then
+  echo "error: neither CLOUDFLARE_API_TOKEN nor CLOUDFLARE_API_KEY is set in .env" >&2
+  exit 1
+fi
+if [[ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
+  echo "error: CLOUDFLARE_ACCOUNT_ID is not set in .env" >&2
+  exit 1
+fi
+
+# Resolve the real wrangler. Prefer a project-local install if it exists;
+# fall back to whichever wrangler is on PATH.
+if [[ -x "$PROJECT_ROOT/node_modules/.bin/wrangler" ]]; then
+  exec "$PROJECT_ROOT/node_modules/.bin/wrangler" "$@"
+else
+  exec wrangler "$@"
+fi
