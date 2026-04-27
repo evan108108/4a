@@ -4,6 +4,7 @@
 // 4A events. Read endpoints are cacheable (max-age=30) and CORS-open.
 
 import { nip19 } from "nostr-tools";
+import { handleCredibility } from "./credibility";
 import { RELAYS } from "./relay-pool";
 import type { NostrEvent, QueryFilter, RelayPool } from "./relay-pool";
 
@@ -84,6 +85,9 @@ export async function handleApiRequest(request: Request, env: ApiEnv): Promise<R
   if (path === "/v0/health") return handleHealth(env);
   if (path.startsWith("/v0/object/")) {
     return handleObject(path.slice("/v0/object/".length), env);
+  }
+  if (path.startsWith("/v0/credibility/")) {
+    return handleCredibility(request, path.slice("/v0/credibility/".length));
   }
 
   return errorResponse("not_found", `unknown endpoint: ${path}`, 404);
