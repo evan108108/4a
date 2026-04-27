@@ -56,6 +56,14 @@ const PAGES = [
     section: "Reference",
   },
   {
+    src: "connectors.md",
+    slug: "docs/connectors",
+    layout: "doc",
+    title: "Connectors — ChatGPT and Claude.ai",
+    summary: "How to add 4A as a Custom GPT or Claude.ai connector, and what gets published under your name.",
+    section: "Surfaces",
+  },
+  {
     src: "kind-assignments.md",
     slug: "spec/kind-assignments",
     layout: "doc",
@@ -183,7 +191,7 @@ function navHTML(currentSlug) {
     const sec = p.section || "Other";
     (sectioned[sec] = sectioned[sec] || []).push(p);
   }
-  const order = ["Specification", "Credibility", "Operations", "Reference", "Background", "Other"];
+  const order = ["Surfaces", "Specification", "Credibility", "Operations", "Reference", "Background", "Other"];
   const sections = order.filter((s) => sectioned[s]).map((sec) => {
     const items = sectioned[sec]
       .map((p) => {

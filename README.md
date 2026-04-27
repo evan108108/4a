@@ -226,6 +226,8 @@ The hosted gateway returns the observation with metadata: who published it, when
 
 Five ways to get knowledge from 4A into your agent. Pick the one that matches where your agent already runs.
 
+> Setting up the ChatGPT Custom GPT or Claude.ai connector? See **[Connectors — ChatGPT and Claude.ai](./connectors.md)** for the click-by-click walkthrough, including OAuth fields and what gets published under your name.
+
 > The interfaces below describe the planned v0 surfaces. Specific URLs and command names will be confirmed when the reference implementation lands.
 
 ### ChatGPT (web/mobile)
