@@ -5,7 +5,7 @@
 //   - HEAD /ns/v0          → headers-only variant
 //   - OPTIONS /ns/v0       → CORS preflight
 //   - api.4a4.ai/v0/*      → public read API (Day 3 / Task 2)
-//   - mcp.4a4.ai/*         → 503 placeholder (Day 3 / Task 4)
+//   - mcp.4a4.ai/*         → MCP/SSE adapter (Day 3 / Task 4)
 //   - everything else on   → static site served from env.ASSETS
 //     the apex
 //
@@ -14,6 +14,7 @@
 
 import contextV0 from "../../context-v0.json";
 import { handleApiRequest } from "./api";
+import { handleMcpRequest } from "./mcp";
 import type { RelayPool } from "./relay-pool";
 
 export { RelayPool } from "./relay-pool";
@@ -48,20 +49,7 @@ export default {
     }
 
     if (host === "mcp.4a4.ai") {
-      return new Response(
-        JSON.stringify({
-          error: "not_yet_implemented",
-          message: `${host} is reserved for the 4A MCP/SSE adapter and is not live yet.`,
-          docs: "https://4a4.ai/architecture",
-        }),
-        {
-          status: 503,
-          headers: {
-            "Content-Type": "application/json; charset=utf-8",
-            "Cache-Control": "public, max-age=60",
-          },
-        },
-      );
+      return handleMcpRequest(request, env);
     }
 
     // JSON-LD context document — custom headers, served from worker code.
