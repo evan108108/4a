@@ -235,6 +235,7 @@
         "operationId": "getHealth",
         "summary": "Gateway health and index size",
         "description": "Liveness check that also reports how many 4A events the gateway has indexed and which Nostr relays it is currently subscribed to. Useful as a sanity check before issuing other queries.",
+        "security": [],
         "responses": {
           "200": {
             "description": "Gateway status.",
@@ -248,9 +249,234 @@
           }
         }
       }
+    },
+    "/v0/publish/observation": {
+      "post": {
+        "operationId": "publishObservation",
+        "summary": "Publish a 4A Observation",
+        "description": "Publish a 4A Observation (kind 30500): an agent's measured statement of property=value about a subject URI, with optional provenance citations. Becomes a Nostr-signed, addressable, replaceable event under the caller's 4A pubkey. Requires the `publish` OAuth scope.",
+        "security": [{ "oauth2": ["publish"] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ObservationBody" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Event signed and accepted by at least one relay.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublishResult" }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error (missing field, malformed URI, oversized content).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid OAuth token.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/publish/claim": {
+      "post": {
+        "operationId": "publishClaim",
+        "summary": "Publish a 4A Claim",
+        "description": "Publish a 4A Claim (kind 30501): a stated proposition about a subject, in the publisher's own voice, with optional citations. Addressable and replaceable under the caller's 4A pubkey. Requires the `publish` OAuth scope.",
+        "security": [{ "oauth2": ["publish"] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ClaimBody" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Event signed and accepted by at least one relay.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublishResult" }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid OAuth token.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/publish/entity": {
+      "post": {
+        "operationId": "publishEntity",
+        "summary": "Publish a 4A Entity",
+        "description": "Publish a 4A Entity (kind 30502): a structured description of a thing — a project, org, person, or concept — with a stable canonical ID. Addressable and replaceable under the caller's 4A pubkey. Requires the `publish` OAuth scope.",
+        "security": [{ "oauth2": ["publish"] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/EntityBody" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Event signed and accepted by at least one relay.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublishResult" }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid OAuth token.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/publish/relation": {
+      "post": {
+        "operationId": "publishRelation",
+        "summary": "Publish a 4A Relation",
+        "description": "Publish a 4A Relation (kind 30503): a typed link between two subjects, with an optional date range. Addressable and replaceable under the caller's 4A pubkey. Requires the `publish` OAuth scope.",
+        "security": [{ "oauth2": ["publish"] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RelationBody" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Event signed and accepted by at least one relay.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublishResult" }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid OAuth token.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/attest": {
+      "post": {
+        "operationId": "attest",
+        "summary": "Publish a 4A attestation (NIP-32 label)",
+        "description": "Publish a 4A attestation (NIP-32 label, kind 1985): a labeled assertion about a target pubkey or event in a 4a.credibility.<domain>, 4a.stamp.<source>, or 4a.sponsor namespace. Used for credibility, identity stamps, and sponsorship. Requires the `publish` OAuth scope.",
+        "security": [{ "oauth2": ["publish"] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AttestBody" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Label event signed and accepted by at least one relay.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublishResult" }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error (subject not 64-char hex, namespace pattern mismatch).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid OAuth token.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
+    "securitySchemes": {
+      "oauth2": {
+        "type": "oauth2",
+        "description": "GitHub OAuth via the 4A gateway. The gateway derives a deterministic Nostr keypair from the OAuth identity using a non-extractable HMAC key in AWS KMS — no per-user keys are stored.",
+        "flows": {
+          "authorizationCode": {
+            "authorizationUrl": "https://api.4a4.ai/auth/github/start",
+            "tokenUrl": "https://api.4a4.ai/auth/github/callback",
+            "scopes": {
+              "publish": "Publish 4A events on the user's behalf"
+            }
+          }
+        }
+      }
+    },
     "schemas": {
       "Event": {
         "type": "object",
@@ -548,6 +774,292 @@
             "examples": [
               "unknown kind 'foo' — try observation|claim|entity|relation|commons"
             ]
+          }
+        }
+      },
+      "ObservationBody": {
+        "type": "object",
+        "description": "Body for POST /v0/publish/observation. Auto d-slug rule: slug(about)/slug(property) unless dSlug is provided.",
+        "required": [
+          "about",
+          "property",
+          "value"
+        ],
+        "properties": {
+          "about": {
+            "type": "string",
+            "description": "Subject the observation is about. Must be a URI (contain '://') or a kind:pubkey:d address.",
+            "examples": [
+              "https://github.com/vercel/next.js"
+            ]
+          },
+          "property": {
+            "type": "string",
+            "description": "Name of the property being measured.",
+            "examples": [
+              "commonPitfall"
+            ]
+          },
+          "value": {
+            "type": "string",
+            "description": "Measured value of the property.",
+            "examples": [
+              "App Router Route Handlers cannot be statically optimized when they read cookies."
+            ]
+          },
+          "derivedFrom": {
+            "type": "array",
+            "description": "PROV-O wasDerivedFrom citations (URIs or kind:pubkey:d addresses).",
+            "items": { "type": "string" }
+          },
+          "topic": {
+            "type": "array",
+            "description": "Hashtag-style topic tags (Nostr `t` tags).",
+            "items": { "type": "string" }
+          },
+          "dSlug": {
+            "type": "string",
+            "description": "Optional explicit `d` tag. Republishing with the same `d` replaces the prior addressable event."
+          }
+        }
+      },
+      "ClaimBody": {
+        "type": "object",
+        "description": "Body for POST /v0/publish/claim. Auto d-slug rule: slug(about)/slug(appearance[:64]) unless dSlug is provided.",
+        "required": [
+          "about",
+          "appearance"
+        ],
+        "properties": {
+          "about": {
+            "type": "string",
+            "description": "Subject the claim is about. URI or kind:pubkey:d address.",
+            "examples": [
+              "https://github.com/vercel/next.js"
+            ]
+          },
+          "appearance": {
+            "type": "string",
+            "description": "Free-text statement of the claim, in the publisher's voice."
+          },
+          "citation": {
+            "type": "array",
+            "description": "Citations (URIs or kind:pubkey:d addresses).",
+            "items": { "type": "string" }
+          },
+          "topic": {
+            "type": "array",
+            "description": "Hashtag-style topic tags.",
+            "items": { "type": "string" }
+          },
+          "dSlug": {
+            "type": "string",
+            "description": "Optional explicit `d` tag."
+          }
+        }
+      },
+      "EntityBody": {
+        "type": "object",
+        "description": "Body for POST /v0/publish/entity. Auto d-slug rule: slug(canonicalId) unless dSlug is provided.",
+        "required": [
+          "canonicalId",
+          "name"
+        ],
+        "properties": {
+          "canonicalId": {
+            "type": "string",
+            "description": "Canonical URI for the entity (becomes JSON-LD @id). URI or kind:pubkey:d address.",
+            "examples": [
+              "https://github.com/vercel/next.js"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-readable name."
+          },
+          "description": {
+            "type": "string",
+            "description": "Optional one-line description."
+          },
+          "codeRepository": {
+            "type": "string",
+            "description": "Optional code repository URI (Schema.org codeRepository)."
+          },
+          "programmingLanguage": {
+            "type": "string",
+            "description": "Optional Schema.org programmingLanguage."
+          },
+          "types": {
+            "type": "array",
+            "description": "Additional Schema.org @type values to merge with the default 'Thing'.",
+            "items": { "type": "string" }
+          },
+          "topic": {
+            "type": "array",
+            "description": "Hashtag-style topic tags.",
+            "items": { "type": "string" }
+          },
+          "dSlug": {
+            "type": "string",
+            "description": "Optional explicit `d` tag."
+          }
+        }
+      },
+      "RelationBody": {
+        "type": "object",
+        "description": "Body for POST /v0/publish/relation. Auto d-slug rule: slug(subject)-slug(roleName)-slug(object) unless dSlug is provided.",
+        "required": [
+          "subject",
+          "object",
+          "roleName"
+        ],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "Subject of the relation. URI or kind:pubkey:d address.",
+            "examples": [
+              "https://github.com/vercel/next.js"
+            ]
+          },
+          "object": {
+            "type": "string",
+            "description": "Object of the relation. URI or kind:pubkey:d address.",
+            "examples": [
+              "https://github.com/facebook/react"
+            ]
+          },
+          "roleName": {
+            "type": "string",
+            "description": "Schema.org roleName for the relation, e.g. 'depends-on', 'maintainer-of'."
+          },
+          "startDate": {
+            "type": "string",
+            "description": "Optional ISO-8601 date the relation begins."
+          },
+          "endDate": {
+            "type": "string",
+            "description": "Optional ISO-8601 date the relation ends."
+          },
+          "dSlug": {
+            "type": "string",
+            "description": "Optional explicit `d` tag."
+          }
+        }
+      },
+      "AttestBody": {
+        "type": "object",
+        "description": "Body for POST /v0/attest. Emits a NIP-32 label event (kind 1985), not addressable.",
+        "required": [
+          "subject",
+          "namespace"
+        ],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "64-char lowercase hex pubkey or event id being labeled.",
+            "examples": [
+              "abc123def4567890abc123def4567890abc123def4567890abc123def4567890"
+            ]
+          },
+          "namespace": {
+            "type": "string",
+            "description": "Label namespace. Must match `4a.credibility.<domain>`, `4a.stamp.<source>`, or `4a.sponsor`.",
+            "examples": [
+              "4a.credibility.next.js"
+            ]
+          },
+          "value": {
+            "type": "string",
+            "description": "Optional label value. Defaults to 'sponsored' for 4a.sponsor, 'self' otherwise."
+          }
+        }
+      },
+      "RelayResult": {
+        "type": "object",
+        "description": "Per-relay outcome from the publish fan-out.",
+        "required": [
+          "relay",
+          "accepted"
+        ],
+        "properties": {
+          "relay": {
+            "type": "string",
+            "description": "Relay URL the event was sent to.",
+            "examples": [
+              "wss://relay.damus.io"
+            ]
+          },
+          "accepted": {
+            "type": "boolean",
+            "description": "True if the relay returned an OK acknowledgment for the event."
+          },
+          "message": {
+            "type": "string",
+            "description": "Relay-supplied message; present on rejection or socket failure."
+          }
+        }
+      },
+      "PublishResult": {
+        "type": "object",
+        "description": "Successful publish response. The event is signed and at least one relay accepted it.",
+        "required": [
+          "ok",
+          "eventId",
+          "address",
+          "kind",
+          "pubkey",
+          "npub",
+          "relayResults"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "description": "Always true in a 200 response.",
+            "examples": [
+              true
+            ]
+          },
+          "eventId": {
+            "type": "string",
+            "description": "64-char hex Nostr event id.",
+            "examples": [
+              "d41d8cd98f00b204e9800998ecf8427ed41d8cd98f00b204e9800998ecf8427e"
+            ]
+          },
+          "address": {
+            "type": ["string", "null"],
+            "description": "Addressable identifier `kind:pubkey:d` for replaceable kinds (30500–30503). Null for kind 1985 attestations, which are not addressable.",
+            "examples": [
+              "30500:abc123def4567890abc123def4567890abc123def4567890abc123def4567890:github-com-vercel-next-js/commonpitfall"
+            ]
+          },
+          "kind": {
+            "type": "integer",
+            "description": "Nostr event kind that was published.",
+            "examples": [
+              30500
+            ]
+          },
+          "pubkey": {
+            "type": "string",
+            "description": "Caller's derived 64-char hex 4A pubkey.",
+            "examples": [
+              "abc123def4567890abc123def4567890abc123def4567890abc123def4567890"
+            ]
+          },
+          "npub": {
+            "type": "string",
+            "description": "Caller's pubkey encoded as bech32 npub.",
+            "examples": [
+              "npub1example000000000000000000000000000000000000000000000000000000"
+            ]
+          },
+          "relayResults": {
+            "type": "array",
+            "description": "Per-relay acknowledgment outcomes. At least one entry has accepted=true.",
+            "items": {
+              "$ref": "#/components/schemas/RelayResult"
+            }
           }
         }
       }
