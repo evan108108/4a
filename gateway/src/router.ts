@@ -75,4 +75,15 @@ export default {
     // Everything else on the apex — serve from the static site.
     return env.ASSETS.fetch(request);
   },
+
+  // Cron-triggered backstop for relay ingestion. Fires every 5 minutes per
+  // wrangler.toml [triggers].crons. Calls RelayPool.sweepFromRelays() which
+  // (1) reopens any dropped subscriptions and (2) replays the last 15 minutes
+  // of events from each relay so anything missed by a silently-dead live WS
+  // gets recovered.
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    const id = env.RELAY_POOL.idFromName("main");
+    const stub = env.RELAY_POOL.get(id);
+    ctx.waitUntil(stub.sweepFromRelays().then(() => undefined));
+  },
 } satisfies ExportedHandler<Env>;

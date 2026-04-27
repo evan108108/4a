@@ -185,6 +185,7 @@ async function handleHealth(env: ApiEnv): Promise<Response> {
     version: "0.0.1",
     relays: stats.relays,
     eventCount: stats.eventCount,
+    liveConnections: stats.liveConnections,
   });
 }
 

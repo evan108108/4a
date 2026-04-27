@@ -59,3 +59,10 @@ new_sqlite_classes = ["RelayPool"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["McpHub"]
+
+# Belt-and-suspender: every 5 minutes, the worker's scheduled() handler
+# calls RelayPool.sweepFromRelays() to backfill any events the live
+# subscriptions missed. Real-time path is the persistent WS; this is the
+# safety net.
+[triggers]
+crons = ["*/5 * * * *"]

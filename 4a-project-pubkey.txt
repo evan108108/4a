@@ -1,0 +1,21 @@
+# 4A project pubkey
+
+This pubkey is the canonical 4A project identity. It signed the genesis
+events that bootstrapped the 4A network on 2026-04-27T16:00:34.808Z.
+
+- pubkey (hex):  27143018e809a7c043a9dffdd85e1e49314a23f0d6fae1d5a54ceacda7803523
+- pubkey (npub): npub1yu2rqx8gpxnuqsafml7ashs7fyc55gls6mawr4d9fn4vmfuqx53sx3cjh5
+
+Genesis events (addressable triples — `kind:pubkey:d`):
+
+- Entity:      `30502:27143018e809a7c043a9dffdd85e1e49314a23f0d6fae1d5a54ceacda7803523:4a`
+- Commons:     `30504:27143018e809a7c043a9dffdd85e1e49314a23f0d6fae1d5a54ceacda7803523:4a`
+- Observation: `30500:27143018e809a7c043a9dffdd85e1e49314a23f0d6fae1d5a54ceacda7803523:genesis/design-principle`
+
+This identity is recognized as authoritative for 4A meta-claims (the protocol
+itself, its conventions, its evolution). Domain-specific knowledge claims
+about other projects, libraries, or organizations should come from pubkeys
+specific to those communities, not this one.
+
+The signing key is held at ~/.sonata/private/4a-project.nsec on the project
+maintainer's machine and is not committed to the repository.

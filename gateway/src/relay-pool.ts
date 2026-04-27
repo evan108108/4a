@@ -1,14 +1,22 @@
 // RelayPool — Durable Object holding outbound WS subscriptions to Nostr relays.
 //
-// Verifies every incoming EVENT (id sha256, schnorr sig, BLAKE3 content tag)
-// and stores valid 4A objects keyed by the addressable triple kind:pubkey:d.
-// Newer events with the same triple replace older ones (NIP-01 addressable rule).
+// For each configured relay, the DO opens a long-lived client WebSocket
+// (fetch + Upgrade: websocket → ws.accept() → addEventListener) and subscribes
+// to the 4A event kinds. CF keeps the DO instance in memory while any
+// outbound WebSocket is open, so the connections.Map below is durable enough
+// for normal operation.
 //
-// Hibernation note: outbound WS connections cannot be fully hibernated by CF
-// (the runtime keeps the DO active while a client-side WS is open). We still use
-// the hibernation API surface (ctx.acceptWebSocket + webSocketMessage handlers)
-// so the message-driven shape is correct and any future runtime improvements
-// flow through automatically.
+// The hibernation API (ctx.acceptWebSocket) is intentionally NOT used here —
+// it is for connections accepted FROM clients, not opened TO upstream relays.
+//
+// Verification on every incoming EVENT: id sha256, schnorr sig, BLAKE3
+// content tag, addressable d-tag. Valid 4A events are stored keyed by the
+// addressable triple kind:pubkey:d (NIP-01 parameterized-replaceable).
+//
+// Reliability backstop (sweepFromRelays): a one-shot replay over the last
+// 15 minutes per relay, called every 5 minutes from a cron trigger in the
+// worker. If a live subscription dies silently, the next sweep recovers any
+// missed events.
 
 import { DurableObject } from "cloudflare:workers";
 import { schnorr } from "@noble/curves/secp256k1.js";
@@ -26,6 +34,8 @@ const SUBSCRIPTION_ID = "4a-pool";
 
 const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS = 60_000;
+const REPLAY_WINDOW_S = 15 * 60;
+const REPLAY_TIMEOUT_MS = 5_000;
 
 const EVENT_PREFIX = "event:";
 const COMMONS_PREFIX = "event:30504:";
@@ -47,11 +57,6 @@ export interface QueryFilter {
   topic?: string;
   author?: string;
   limit?: number;
-}
-
-interface ConnectionAttachment {
-  relay: string;
-  connectedAt: number;
 }
 
 const BASE32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
@@ -125,6 +130,10 @@ function relayHttpUrl(wssUrl: string): string {
 }
 
 export class RelayPool extends DurableObject<unknown> {
+  // Live outbound WebSockets keyed by relay URL. CF keeps the DO instance in
+  // memory while any of these are open, so this Map survives between requests.
+  private connections: Map<string, WebSocket> = new Map();
+
   async query(filter: QueryFilter): Promise<NostrEvent[]> {
     await this.ensureConnected();
     const limit = filter.limit ?? 100;
@@ -154,14 +163,83 @@ export class RelayPool extends DurableObject<unknown> {
     return Array.from(list.values());
   }
 
-  async stats(): Promise<{ relays: readonly string[]; eventCount: number }> {
+  async stats(): Promise<{
+    relays: readonly string[];
+    eventCount: number;
+    liveConnections: number;
+  }> {
     await this.ensureConnected();
     const list = await this.ctx.storage.list({ prefix: EVENT_PREFIX });
-    return { relays: RELAYS, eventCount: list.size };
+    return {
+      relays: RELAYS,
+      eventCount: list.size,
+      liveConnections: this.connections.size,
+    };
   }
 
-  async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {
-    const text = typeof message === "string" ? message : new TextDecoder().decode(message);
+  // Backstop sweep — called every 5 minutes from the worker's scheduled()
+  // handler. Reopens any dropped subscriptions and replays the last
+  // REPLAY_WINDOW_S seconds of events from each relay so anything that was
+  // missed by a silently-dead live WS gets recovered.
+  async sweepFromRelays(): Promise<{
+    relaysQueried: number;
+    eventsBackfilled: number;
+  }> {
+    await this.ensureConnected();
+    const sinceUnix = Math.floor(Date.now() / 1000) - REPLAY_WINDOW_S;
+    let backfilled = 0;
+    for (const relay of RELAYS) {
+      try {
+        backfilled += await this.replayRelay(relay, sinceUnix);
+      } catch {
+        // per-relay failures must not block other relays
+      }
+    }
+    return { relaysQueried: RELAYS.length, eventsBackfilled: backfilled };
+  }
+
+  async alarm(): Promise<void> {
+    await this.ensureConnected();
+  }
+
+  private async ensureConnected(): Promise<void> {
+    for (const relay of RELAYS) {
+      if (this.connections.has(relay)) continue;
+      try {
+        await this.openRelay(relay);
+        await this.ctx.storage.delete(`${RECONNECT_PREFIX}${relay}`);
+      } catch {
+        await this.scheduleReconnect(relay);
+      }
+    }
+  }
+
+  private async openRelay(relay: string): Promise<void> {
+    const response = await fetch(relayHttpUrl(relay), {
+      headers: { Upgrade: "websocket" },
+    });
+    const ws = response.webSocket;
+    if (!ws) throw new Error(`relay ${relay} did not upgrade to WebSocket`);
+    ws.accept();
+
+    ws.addEventListener("message", (e: MessageEvent) => {
+      this.handleRelayMessage(e.data).catch(() => {});
+    });
+
+    const handleEnd = () => {
+      const current = this.connections.get(relay);
+      if (current === ws) this.connections.delete(relay);
+      this.scheduleReconnect(relay).catch(() => {});
+    };
+    ws.addEventListener("close", handleEnd);
+    ws.addEventListener("error", handleEnd);
+
+    this.connections.set(relay, ws);
+    ws.send(JSON.stringify(["REQ", SUBSCRIPTION_ID, { kinds: [...KINDS_4A] }]));
+  }
+
+  private async handleRelayMessage(data: string | ArrayBuffer): Promise<void> {
+    const text = typeof data === "string" ? data : new TextDecoder().decode(data);
     let parsed: unknown;
     try {
       parsed = JSON.parse(text);
@@ -170,23 +248,10 @@ export class RelayPool extends DurableObject<unknown> {
     }
     if (!Array.isArray(parsed) || parsed.length < 2) return;
     const [type, subId, payload] = parsed as [string, string, unknown];
-    if (type !== "EVENT" || subId !== SUBSCRIPTION_ID) return;
+    if (type !== "EVENT") return;
+    if (subId !== SUBSCRIPTION_ID && !subId.startsWith("4a-replay-")) return;
     if (!isValidEvent(payload)) return;
     await this.handleEvent(payload);
-  }
-
-  async webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean): Promise<void> {
-    const att = ws.deserializeAttachment() as ConnectionAttachment | null;
-    if (att?.relay) await this.scheduleReconnect(att.relay);
-  }
-
-  async webSocketError(ws: WebSocket, _error: unknown): Promise<void> {
-    const att = ws.deserializeAttachment() as ConnectionAttachment | null;
-    if (att?.relay) await this.scheduleReconnect(att.relay);
-  }
-
-  async alarm(): Promise<void> {
-    await this.ensureConnected();
   }
 
   private async handleEvent(event: NostrEvent): Promise<void> {
@@ -204,6 +269,90 @@ export class RelayPool extends DurableObject<unknown> {
     await this.ctx.storage.put(key, event);
   }
 
+  private replayRelay(relay: string, sinceUnix: number): Promise<number> {
+    return new Promise<number>((resolve) => {
+      let count = 0;
+      let settled = false;
+      const subId = `4a-replay-${relay.replace(/[^a-z0-9]/gi, "")}-${Date.now().toString(36)}`;
+
+      const finish = (n: number) => {
+        if (settled) return;
+        settled = true;
+        resolve(n);
+      };
+
+      let ws: WebSocket | null = null;
+      const timer = setTimeout(() => {
+        try {
+          ws?.close();
+        } catch {}
+        finish(count);
+      }, REPLAY_TIMEOUT_MS);
+
+      (async () => {
+        try {
+          const response = await fetch(relayHttpUrl(relay), {
+            headers: { Upgrade: "websocket" },
+          });
+          ws = response.webSocket;
+          if (!ws) {
+            clearTimeout(timer);
+            return finish(0);
+          }
+          ws.accept();
+
+          ws.addEventListener("message", async (e: MessageEvent) => {
+            const text =
+              typeof e.data === "string" ? e.data : new TextDecoder().decode(e.data as ArrayBuffer);
+            let parsed: unknown;
+            try {
+              parsed = JSON.parse(text);
+            } catch {
+              return;
+            }
+            if (!Array.isArray(parsed) || parsed.length < 2) return;
+            const [type, sid, payload] = parsed as [string, string, unknown];
+            if (sid !== subId) return;
+            if (type === "EOSE") {
+              clearTimeout(timer);
+              try {
+                ws?.close();
+              } catch {}
+              finish(count);
+              return;
+            }
+            if (type === "EVENT" && isValidEvent(payload)) {
+              const before = await this.ctx.storage.get<NostrEvent>(
+                `${EVENT_PREFIX}${payload.kind}:${payload.pubkey}:${findTag(payload.tags, "d") ?? ""}`,
+              );
+              await this.handleEvent(payload);
+              const after = await this.ctx.storage.get<NostrEvent>(
+                `${EVENT_PREFIX}${payload.kind}:${payload.pubkey}:${findTag(payload.tags, "d") ?? ""}`,
+              );
+              if (after && (!before || before.id !== after.id)) count++;
+            }
+          });
+
+          ws.addEventListener("close", () => {
+            clearTimeout(timer);
+            finish(count);
+          });
+          ws.addEventListener("error", () => {
+            clearTimeout(timer);
+            finish(count);
+          });
+
+          ws.send(
+            JSON.stringify(["REQ", subId, { kinds: [...KINDS_4A], since: sinceUnix }]),
+          );
+        } catch {
+          clearTimeout(timer);
+          finish(0);
+        }
+      })();
+    });
+  }
+
   private matchesAbout(event: NostrEvent, about: string): boolean {
     let payload: Record<string, unknown>;
     try {
@@ -217,34 +366,6 @@ export class RelayPool extends DurableObject<unknown> {
       if (v && typeof v === "object" && (v as Record<string, unknown>)["@id"] === about) return true;
     }
     return false;
-  }
-
-  private async ensureConnected(): Promise<void> {
-    const live = new Set<string>();
-    for (const ws of this.ctx.getWebSockets()) {
-      const att = ws.deserializeAttachment() as ConnectionAttachment | null;
-      if (att?.relay) live.add(att.relay);
-    }
-    for (const relay of RELAYS) {
-      if (live.has(relay)) continue;
-      try {
-        await this.openRelay(relay);
-        await this.ctx.storage.delete(`${RECONNECT_PREFIX}${relay}`);
-      } catch {
-        await this.scheduleReconnect(relay);
-      }
-    }
-  }
-
-  private async openRelay(relay: string): Promise<void> {
-    const response = await fetch(relayHttpUrl(relay), {
-      headers: { Upgrade: "websocket" },
-    });
-    const ws = response.webSocket;
-    if (!ws) throw new Error(`relay ${relay} did not upgrade to WebSocket`);
-    this.ctx.acceptWebSocket(ws);
-    ws.serializeAttachment({ relay, connectedAt: Date.now() } satisfies ConnectionAttachment);
-    ws.send(JSON.stringify(["REQ", SUBSCRIPTION_ID, { kinds: [...KINDS_4A] }]));
   }
 
   private async scheduleReconnect(relay: string): Promise<void> {
