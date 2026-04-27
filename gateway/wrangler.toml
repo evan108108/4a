@@ -14,6 +14,15 @@ compatibility_date = "2026-04-27"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 
+# Static-rendered site (built from repo markdown by `npm run build:site`).
+# Worker runs first; for any path not handled by the worker, it delegates
+# to env.ASSETS.fetch(...) which serves the rendered HTML.
+[assets]
+directory = "./dist/site"
+binding = "ASSETS"
+not_found_handling = "404-page"
+run_worker_first = true
+
 # Bind the worker to the three zones.
 # Each route uses zone_name (not zone_id) so wrangler resolves the zone via the
 # account context.
