@@ -10,7 +10,8 @@
     "dev": "npm run build:site && wrangler dev --config gateway/wrangler.toml",
     "deploy": "npm run build:site && wrangler deploy --config gateway/wrangler.toml",
     "tail": "wrangler tail --config gateway/wrangler.toml",
-    "smoke-test": "node scripts/smoke-test.mjs"
+    "smoke-test": "node scripts/smoke-test.mjs",
+    "smoke-test:phase2": "node scripts/smoke-test-phase2.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260426.1",
