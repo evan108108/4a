@@ -40,6 +40,13 @@ const PAGES = [
     summary: "A convention on Nostr for AI-mediated public knowledge exchange.",
   },
   {
+    src: "get-started.md",
+    slug: "get-started",
+    layout: "page",
+    title: "Install 4A",
+    summary: "Add 4A to ChatGPT or Claude.ai in under a minute. A public knowledge commons your AI can read and write to.",
+  },
+  {
     src: "SPEC.md",
     slug: "spec",
     layout: "doc",
@@ -256,6 +263,7 @@ function siteHeader() {
   return `<header class="site-header">
   <a href="/" class="brand"><span class="brand-mark">4A</span><span class="brand-tag">Agent-Agnostic Accessible Archive</span></a>
   <nav class="top-nav" aria-label="Site">
+    <a href="/get-started/" class="top-nav-cta">Get started</a>
     <a href="/spec/">Spec</a>
     <a href="/architecture/">Architecture</a>
     <a href="${REPO_URL}" rel="noreferrer noopener">GitHub</a>
@@ -302,9 +310,9 @@ function landingHero() {
     <p class="hero-tag">Agent-Agnostic Accessible Archive — a convention on Nostr for AI-mediated public knowledge exchange.</p>
     <p class="hero-sub">Every agent — local or cloud-hosted — publishes and consumes structured knowledge with provenance, vendor-neutral and signature-verified, on infrastructure that already exists.</p>
     <div class="hero-actions">
-      <a class="btn btn-primary" href="/spec">Read the spec</a>
+      <a class="btn btn-primary" href="/get-started/">Get started →</a>
+      <a class="btn" href="/spec/">Read the spec</a>
       <a class="btn" href="${REPO_URL}" rel="noreferrer">View on GitHub</a>
-      <a class="btn btn-ghost" href="${SITE_URL}/ns/v0">JSON-LD context →</a>
     </div>
     <pre class="hero-curl"><code>curl -i ${SITE_URL}/ns/v0</code></pre>
   </div>
@@ -318,6 +326,21 @@ ${siteHeader()}
 ${landingHero()}
 <main class="prose container">
 ${html}
+</main>
+${siteFooter()}
+</body>
+</html>
+`;
+}
+
+function pageTemplate(page, html) {
+  return `${commonHead(page)}
+<body class="layout-page">
+${siteHeader()}
+<main class="page-main">
+<article class="prose page-prose">
+${html}
+</article>
 </main>
 ${siteFooter()}
 </body>
@@ -698,11 +721,126 @@ a:hover { text-decoration: underline; text-underline-offset: 2px; }
   color: var(--c-fg-muted);
 }
 
+/* ─── top-nav CTA ─── */
+.top-nav-cta {
+  background: var(--c-accent);
+  color: #fff !important;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-weight: 600;
+}
+.top-nav-cta:hover { background: color-mix(in srgb, var(--c-accent) 88%, black); text-decoration: none; }
+
+/* ─── page layout (marketing) ─── */
+.layout-page .page-main {
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 60px 28px 40px;
+}
+.layout-page .page-prose { max-width: none; padding: 0; }
+.install-intro h1 {
+  font-size: clamp(34px, 5vw, 52px);
+  letter-spacing: -0.025em;
+  line-height: 1.1;
+  margin: 0 0 16px;
+}
+.install-intro p {
+  font-size: 19px;
+  color: var(--c-fg-muted);
+  max-width: 620px;
+  margin: 0 0 12px;
+}
+
+/* ─── install cards ─── */
+.install-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin: 40px 0 16px;
+}
+.install-card {
+  border: 1px solid var(--c-border);
+  border-radius: 14px;
+  padding: 28px 28px 24px;
+  background: var(--c-bg-muted);
+  display: flex;
+  flex-direction: column;
+}
+.install-card:hover {
+  border-color: color-mix(in srgb, var(--c-accent) 35%, var(--c-border));
+}
+.install-card h3 {
+  font-size: 22px;
+  margin: 0 0 10px;
+  letter-spacing: -0.01em;
+}
+.install-card > p:first-of-type {
+  color: var(--c-fg-muted);
+  margin: 0 0 18px;
+  font-size: 15.5px;
+}
+.install-card a:not(.install-note) {
+  font-weight: 500;
+}
+.install-card a strong, .install-card p > strong > a, .install-card p > a > strong {
+  display: inline-block;
+}
+.install-card > p > a > strong {
+  display: inline-block;
+  background: var(--c-accent);
+  color: #fff;
+  padding: 10px 18px;
+  border-radius: 8px;
+  font-weight: 600;
+  margin: 4px 0 12px;
+}
+.install-card > p > a:hover > strong {
+  background: color-mix(in srgb, var(--c-accent) 88%, black);
+}
+.install-card > p > a:hover { text-decoration: none; }
+.install-note {
+  display: block;
+  color: var(--c-fg-faint);
+  font-size: 13.5px;
+  margin-top: -4px;
+  margin-bottom: 14px;
+  font-style: italic;
+}
+.install-card pre {
+  background: var(--c-bg);
+  font-size: 13.5px;
+  margin: 4px 0 18px;
+}
+.install-card ol {
+  font-size: 15px;
+  padding-left: 1.2em;
+  margin: 0 0 16px;
+}
+.install-card ol li { margin: 6px 0; }
+.install-card > p:last-of-type {
+  font-size: 14.5px;
+  color: var(--c-fg-muted);
+  margin: auto 0 0;
+  padding-top: 12px;
+  border-top: 1px dashed var(--c-border);
+}
+
+/* ─── install footer ─── */
+.install-footer {
+  margin-top: 40px;
+  padding-top: 24px;
+  border-top: 1px solid var(--c-border);
+  font-size: 14.5px;
+  color: var(--c-fg-muted);
+}
+.install-footer p { margin: 6px 0; }
+
 /* ─── responsive ─── */
 @media (max-width: 880px) {
   .layout-doc .doc-shell { grid-template-columns: 1fr; gap: 24px; }
   .sidebar { position: static; max-height: none; border-bottom: 1px solid var(--c-border); padding-bottom: 24px; }
   .footer-row { grid-template-columns: 1fr; gap: 28px; }
+  .install-cards { grid-template-columns: 1fr; }
 }
 @media (max-width: 540px) {
   .site-header { padding: 14px 18px; }
@@ -834,7 +972,10 @@ function build() {
   for (const page of PAGES) {
     const md = readFileSync(join(REPO_ROOT, page.src), "utf8");
     const html = renderMarkdownToHtml(md);
-    const rendered = page.layout === "landing" ? landingTemplate(page, html) : docTemplate(page, html);
+    const rendered =
+      page.layout === "landing" ? landingTemplate(page, html)
+      : page.layout === "page" ? pageTemplate(page, html)
+      : docTemplate(page, html);
     const outPath = page.slug === "" ? "index.html" : join(page.slug, "index.html");
     writeFile(outPath, rendered);
   }
