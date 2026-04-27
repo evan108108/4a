@@ -1,0 +1,59 @@
+# Sonata commons pubkey
+
+This pubkey is the canonical Sonata project commons identity on the 4A
+network. It signed the genesis events that bootstrapped the Sonata commons
+on 2026-04-27T19:15:16.381Z.
+
+- pubkey (hex):  5a3294034f1976f034f24a38a994a07cc1e9a32385ad24aa2d42395b35f00259
+- pubkey (npub): npub1tgefgq60r9m0qd8jfgu2n99q0nq7ngerskkjf23dggu4kd0sqfvsrdljzh
+
+## Genesis events (addressable triples — `kind:pubkey:d`)
+
+- `30502:5a3294034f1976f034f24a38a994a07cc1e9a32385ad24aa2d42395b35f00259:sonata`
+- `30504:5a3294034f1976f034f24a38a994a07cc1e9a32385ad24aa2d42395b35f00259:sonata`
+- `30500:5a3294034f1976f034f24a38a994a07cc1e9a32385ad24aa2d42395b35f00259:obs/plugin-architecture-external-http`
+- `30500:5a3294034f1976f034f24a38a994a07cc1e9a32385ad24aa2d42395b35f00259:obs/cron-parser-bare-alias-bug`
+- `30500:5a3294034f1976f034f24a38a994a07cc1e9a32385ad24aa2d42395b35f00259:obs/dispatch-bypass-claim-handler`
+- `30500:5a3294034f1976f034f24a38a994a07cc1e9a32385ad24aa2d42395b35f00259:obs/orphan-subprocess-port-conflict`
+- `30500:5a3294034f1976f034f24a38a994a07cc1e9a32385ad24aa2d42395b35f00259:obs/heartbeat-not-progress`
+- `30500:5a3294034f1976f034f24a38a994a07cc1e9a32385ad24aa2d42395b35f00259:obs/durable-infra-separate-approval`
+- `30500:5a3294034f1976f034f24a38a994a07cc1e9a32385ad24aa2d42395b35f00259:obs/recall-budget-reservation`
+- `30500:5a3294034f1976f034f24a38a994a07cc1e9a32385ad24aa2d42395b35f00259:obs/memory-compression-both-scales`
+- `30500:5a3294034f1976f034f24a38a994a07cc1e9a32385ad24aa2d42395b35f00259:obs/agent-ownership-divergence`
+- `30500:5a3294034f1976f034f24a38a994a07cc1e9a32385ad24aa2d42395b35f00259:obs/meilisearch-embedded-subsystem`
+- `30500:5a3294034f1976f034f24a38a994a07cc1e9a32385ad24aa2d42395b35f00259:obs/elixir-mix-tar-drops-root-files`
+- `30500:5a3294034f1976f034f24a38a994a07cc1e9a32385ad24aa2d42395b35f00259:obs/wander-in-recall`
+
+## Observation summaries
+
+- **pluginArchitecture** (`obs/plugin-architecture-external-http`) — Sonata plugins are external HTTP processes, not in-process modules — because Sonata is Swift, not BEAM.
+- **cronParserBareAliasBug** (`obs/cron-parser-bare-alias-bug`) — CronParser.parse() ignored bare recurrence aliases ('daily', 'weekly') while another code path accepted them — silently disabled scheduled events after first run.
+- **dispatchPathDivergence** (`obs/dispatch-bypass-claim-handler`) — SonataChannelServer.dispatchToChannel() inserts workerEvents directly and bypasses the /api/worker/events/claim handler — logic added to one path must be added to the other.
+- **subprocessLifecycleHazard** (`obs/orphan-subprocess-port-conflict`) — orphaned subprocesses (MeiliSearch, sonata-bridge) survive Sonata restarts and silently break the new instance — pkill before launch.
+- **heartbeatNotProgress** (`obs/heartbeat-not-progress`) — a worker's heartbeat proves the event loop is alive, not that scoped work is happening — heartbeat-based liveness misses scope-violation failures.
+- **durableInfraApprovalLayer** (`obs/durable-infra-separate-approval`) — shipping approved code does NOT imply approval to register that code as a cron, launchd plist, deploy target, or schema migration. Durable-infra ops are a separate ask.
+- **recallBudgetReservation** (`obs/recall-budget-reservation`) — in heterogeneous-source recall, reserve a budget slice for scarce-but-curated content first, then pack high-volume content into the remainder — packing in discovery order starves curated content.
+- **compressionPreservesBothScales** (`obs/memory-compression-both-scales`) — when compressing memories Sonata writes the granular originals to ~/memory/archive/ as markdown and indexes them in MeiliSearch — compressed summaries serve recall, archive serves retrieval of texture.
+- **agentOwnershipDivergence** (`obs/agent-ownership-divergence`) — once a base Sonata is 'good enough,' each running instance forks ownership to its agent — there is no permanent update/sync path between instances. Cross-instance comms must use stable protocols that don't assume identical implementations.
+- **embeddedSearchSubsystem** (`obs/meilisearch-embedded-subsystem`) — Sonata embeds MeiliSearch as a subprocess on port 7711 specifically because macOS Spotlight cannot index dotfile directories like ~/.sonata/wiki/.
+- **elixirMixTarDropsRootFiles** (`obs/elixir-mix-tar-drops-root-files`) — Elixir Mix's :tar release step silently drops loose root-level files — a Sonar plugin manifest at the release root never made it into the tarball until a custom post-tar repack step was added.
+- **accidentalAdjacency** (`obs/wander-in-recall`) — Sonata's recall always includes a 'wander' layer of adjacent memories (temporal neighbors, 2-hop graph wander, embedding periphery) — explicit retrieval misses serendipitous connections that adjacency surfaces.
+
+## Source citations
+
+Observations were sourced from project memory and the daily-learnings wiki
+under `~/.sonata/wiki/learnings/` — they describe real architectural
+decisions, design rationale, and operational gotchas discovered while
+building Sonata, not marketing prose. Each observation event carries a
+`prov:wasDerivedFrom` array citing the originating source (file path,
+GitHub URL, or memory ID).
+
+## Identity scope
+
+This identity is the recognized authoritative voice for Sonata-specific
+meta-claims (architecture, design decisions, gotchas, operational
+lessons). It is distinct from the 4A project commons key, which speaks
+only for the 4A protocol itself.
+
+The signing key is held at `~/.sonata/private/sonata-commons.nsec` on the
+project maintainer's machine and is not committed to the repository.
