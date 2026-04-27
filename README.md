@@ -332,7 +332,7 @@ They get low credibility scores, get filtered by aggregators they disagree with,
 No. It has no token, no stake, no mining. Every incentive in the system is mundane: hobbyist relay operators, institutional hosting, paid-relay tiers, and the reputational value of a well-regarded pubkey. See [`relay-economics.md`](./relay-economics.md).
 
 **Can I use 4A privately, for my team?**
-Not in v0 — 4A is public-by-design. For private team memory, a sibling product called Throughline is planned for shared team memory with privacy controls.
+Not in v0 — 4A is public-by-design at v0. Private mode is on the roadmap: kinds 30510–30514 are reserved for encrypted variants of the public kinds, using NIP-44 v2 for pairwise encryption and (when stable) NIP-104/MLS for group encryption. See `SPEC.md` → "Future work — private mode." Throughline, the planned team-memory product, is now expected to ship as a UX layer on top of 4A's private mode rather than as a separate protocol.
 
 **Can I bridge 4A to other protocols?**
 The event envelope is designed so future bridges to AT Protocol records, EAS offchain attestations, and W3C Verifiable Credentials are trivial. None are implemented in v0.

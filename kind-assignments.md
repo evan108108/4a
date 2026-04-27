@@ -181,7 +181,8 @@ Clients that don't recognize 4A kinds fall back to the `alt` tag for a human-rea
 Leave these slots unclaimed pending experience:
 
 - 30505–30509 — pin declarations, aggregator rollups, responses, disputes. Design after v0 adoption data.
-- 30510–30519 — further post-v0 kinds.
+- 30510–30514 — encrypted variants of 30500–30504 (private mode). Reserved 1:1 with the public kinds (30510 = encrypted Observation, 30511 = encrypted Claim, etc.). See [`SPEC.md`](./SPEC.md) → "Future work — private mode" for the anticipated design. Implementations MUST NOT publish in this range until the encrypted-variant specification is finalized.
+- 30515–30519 — further post-v0 kinds.
 
 ## Open questions for the NIP submission
 

@@ -263,6 +263,42 @@ A 4A implementation MAY claim conformance at one of the following levels:
 
 Implementations are not required to support all four object types, but implementations that publish or consume any 4A event MUST handle the `alt` tag fallback for kinds they do not recognize.
 
+## Future work — private mode (deferred)
+
+A future revision of this specification will define **encrypted variants** of the five public kinds, allowing publishers to share knowledge with specific recipients (individuals or teams) using the same Nostr substrate. Private mode is **not part of v0** — it is deferred until public mode has adoption signal and until [NIP-104/MLS](https://github.com/nostr-protocol/nips/blob/master/104.md) stabilizes for group encryption.
+
+### Reserved kinds
+
+Kinds 30510–30514 are reserved for encrypted variants of the public kinds:
+
+| Encrypted kind | Public counterpart | Object |
+|---|---|---|
+| 30510 | 30500 | Encrypted Observation |
+| 30511 | 30501 | Encrypted Claim |
+| 30512 | 30502 | Encrypted Entity |
+| 30513 | 30503 | Encrypted Relation |
+| 30514 | 30504 | Encrypted Commons |
+
+Implementations MUST NOT publish events with kinds in this range until the encrypted-variant specification is finalized.
+
+### Anticipated design
+
+When private mode lands, encrypted events will:
+
+- Use [NIP-44 v2](https://github.com/nostr-protocol/nips/blob/master/44.md) for pairwise encryption (one publisher to one recipient pubkey)
+- Use [NIP-104](https://github.com/nostr-protocol/nips/blob/master/104.md) (MLS-on-Nostr) for group encryption with proper forward and backward secrecy, once stable
+- Carry one or more `p` tags pointing at recipient pubkeys
+- Optionally use [NIP-17 gift-wrapping](https://github.com/nostr-protocol/nips/blob/master/17.md) (kind 1059) for metadata privacy
+- Be filterable by recipients via standard Nostr `#p` filters
+
+### Identity restriction
+
+Private mode will require a **non-custodial key** — either a [NIP-46 bunker](https://github.com/nostr-protocol/nips/blob/master/46.md) or a locally generated keypair. Custodial keys derived from OAuth (described in the Identity section above) will not be usable for private publishing or reading, because the gateway holding the master HMAC key could otherwise decrypt every private event sent to its custodial users. This restriction is intentional: it preserves the "no plaintext private data on hosted infrastructure" property that custodial mode relies on.
+
+### Product implication: Throughline
+
+Throughline — currently mentioned as a planned sibling product for private team memory — is anticipated to ship as a UX layer (team management, billing, member roster) on top of 4A's private mode rather than as a separate protocol. This document will be updated when private mode ships and Throughline's relationship is finalized.
+
 ## Companion documents
 
 - [`README.md`](./README.md) — overview and pitch
