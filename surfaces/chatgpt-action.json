@@ -21,14 +21,19 @@
       "get": {
         "operationId": "queryEvents",
         "summary": "Query 4A events",
-        "description": "Search the archive for 4A events. Filter by `kind` (the type of object — observation, claim, entity, relation, or commons), `about` (a subject identifier such as a URL, DOI, or `kind:pubkey:d-tag` address), `topic` (a free-form topical tag), or `author` (a 64-char hex pubkey or npub bech32). Up to `limit` events are returned, newest first. Use this as the default lookup tool when the user asks what is known about something.",
+        "description": "Search the 4A archive for signed events. Filter by kind (observation, claim, entity, relation, commons), about (subject URI or kind:pubkey:d-tag), topic (hashtag), or author (npub or hex pubkey). Use this first when the user asks what 4A knows about a project, person, library, or concept.",
         "parameters": [
           {
             "name": "about",
             "in": "query",
             "description": "Subject identifier the events are about. Matches against the event's `about` JSON-LD field or `a`/`r`/`i` tags. Examples: `https://github.com/evan108108/4a`, `kind:pubkey:d-tag`, `did:plc:abc123`.",
             "required": false,
-            "schema": { "type": "string", "examples": ["https://github.com/evan108108/4a"] }
+            "schema": {
+              "type": "string",
+              "examples": [
+                "https://github.com/evan108108/4a"
+              ]
+            }
           },
           {
             "name": "kind",
@@ -37,8 +42,16 @@
             "required": false,
             "schema": {
               "type": "string",
-              "enum": ["observation", "claim", "entity", "relation", "commons"],
-              "examples": ["claim"]
+              "enum": [
+                "observation",
+                "claim",
+                "entity",
+                "relation",
+                "commons"
+              ],
+              "examples": [
+                "claim"
+              ]
             }
           },
           {
@@ -46,7 +59,12 @@
             "in": "query",
             "description": "Free-form topical tag (matches the event's `t` tag).",
             "required": false,
-            "schema": { "type": "string", "examples": ["nostr"] }
+            "schema": {
+              "type": "string",
+              "examples": [
+                "nostr"
+              ]
+            }
           },
           {
             "name": "author",
@@ -55,7 +73,9 @@
             "required": false,
             "schema": {
               "type": "string",
-              "examples": ["npub1example000000000000000000000000000000000000000000000000000000"]
+              "examples": [
+                "npub1example000000000000000000000000000000000000000000000000000000"
+              ]
             }
           },
           {
@@ -76,14 +96,20 @@
             "description": "Matching events, newest first.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/QueryResponse" }
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResponse"
+                }
               }
             }
           },
           "400": {
             "description": "Invalid query parameter.",
             "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
             }
           }
         }
@@ -93,7 +119,7 @@
       "get": {
         "operationId": "getObject",
         "summary": "Fetch one 4A object by its addressable identifier",
-        "description": "Returns the single signed event at the addressable identifier `kind:pubkey:d-tag`. This is how 4A objects cite each other: an `Entity` published by author `<pubkey>` with `d`-tag `4a-protocol` is permanently addressed as `30502:<pubkey>:4a-protocol`. Use this when you have a citation and want to retrieve its full payload.",
+        "description": "Returns the single signed event at the addressable identifier kind:pubkey:d-tag. Use this to fetch the full payload of a specific 4A object after queryEvents returns its address, or to verify a citation found in another events content.",
         "parameters": [
           {
             "name": "address",
@@ -102,7 +128,9 @@
             "description": "Addressable identifier `kind:pubkey:d` where kind is 30500..30504, pubkey is 64-char hex or npub, and d is the publisher's stable slug. Pass it URL-encoded.",
             "schema": {
               "type": "string",
-              "examples": ["30502:abc123def4567890abc123def4567890abc123def4567890abc123def4567890:4a-protocol"]
+              "examples": [
+                "30502:abc123def4567890abc123def4567890abc123def4567890abc123def4567890:4a-protocol"
+              ]
             }
           }
         ],
@@ -111,20 +139,30 @@
             "description": "The 4A event at this address.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Event" }
+                "schema": {
+                  "$ref": "#/components/schemas/Event"
+                }
               }
             }
           },
           "400": {
             "description": "Malformed address.",
             "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
             }
           },
           "404": {
             "description": "No event known at this address.",
             "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
             }
           }
         }
@@ -134,13 +172,15 @@
       "get": {
         "operationId": "listCommons",
         "summary": "List Commons declarations",
-        "description": "Returns every `Commons` event the gateway has indexed. A Commons event declares a shared topical archive — a self-organizing knowledge area like \"the 4A protocol\" or \"the Nostr ecosystem\" — with co-maintainers, scope, and policies. Use this to discover what topical bodies of knowledge exist before issuing narrower queries.",
+        "description": "Returns every Commons event the gateway has indexed. A Commons declares a shared topical archive (e.g. the 4A protocol) with co-maintainer pubkeys. Use this to discover what topical knowledge areas exist on 4A before deciding where to look.",
         "responses": {
           "200": {
             "description": "All known Commons declarations.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/CommonsList" }
+                "schema": {
+                  "$ref": "#/components/schemas/CommonsList"
+                }
               }
             }
           }
@@ -151,7 +191,7 @@
       "get": {
         "operationId": "getCredibility",
         "summary": "Look up credibility scores for a publisher",
-        "description": "Returns NIP-85 trusted-assertion scores about a publisher pubkey, sourced from a configured aggregator relay (default `relay.nostr.band`). Use this to gauge how much weight to put on a publisher's claims before citing them. Higher scores mean more endorsements from the aggregator's trust graph; an empty `scores` array means the aggregator has no signal on this pubkey yet.",
+        "description": "Returns NIP-85 trusted-assertion scores about a publisher pubkey, sourced from a configured aggregator relay. Use to gauge how much weight to put on a publishers claims; an empty result means no aggregator has rated this pubkey yet, not that they are untrusted.",
         "parameters": [
           {
             "name": "pubkey",
@@ -160,7 +200,9 @@
             "description": "Publisher identity — 64-char lowercase hex pubkey or `npub1...` bech32.",
             "schema": {
               "type": "string",
-              "examples": ["abc123def4567890abc123def4567890abc123def4567890abc123def4567890"]
+              "examples": [
+                "abc123def4567890abc123def4567890abc123def4567890abc123def4567890"
+              ]
             }
           }
         ],
@@ -169,14 +211,20 @@
             "description": "Credibility lookup result. The `warning` field is present when the aggregator was unreachable; in that case `scores` will be empty rather than an error.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/CredibilityResponse" }
+                "schema": {
+                  "$ref": "#/components/schemas/CredibilityResponse"
+                }
               }
             }
           },
           "400": {
             "description": "Pubkey is not a valid hex or npub.",
             "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
             }
           }
         }
@@ -192,7 +240,9 @@
             "description": "Gateway status.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/HealthResponse" }
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
               }
             }
           }
@@ -205,43 +255,78 @@
       "Event": {
         "type": "object",
         "description": "A signed Nostr event in the 4A kind range. The JSON-LD payload (an Observation, Claim, Entity, Relation, or Commons object) is encoded as a JSON string in `content`. Parse `content` with `JSON.parse` to read the structured object.",
-        "required": ["id", "pubkey", "created_at", "kind", "tags", "content", "sig"],
+        "required": [
+          "id",
+          "pubkey",
+          "created_at",
+          "kind",
+          "tags",
+          "content",
+          "sig"
+        ],
         "properties": {
           "id": {
             "type": "string",
             "description": "64-char hex SHA-256 of the canonical event serialization.",
-            "examples": ["d41d8cd98f00b204e9800998ecf8427ed41d8cd98f00b204e9800998ecf8427e"]
+            "examples": [
+              "d41d8cd98f00b204e9800998ecf8427ed41d8cd98f00b204e9800998ecf8427e"
+            ]
           },
           "pubkey": {
             "type": "string",
             "description": "Publisher's 64-char hex secp256k1 pubkey.",
-            "examples": ["abc123def4567890abc123def4567890abc123def4567890abc123def4567890"]
+            "examples": [
+              "abc123def4567890abc123def4567890abc123def4567890abc123def4567890"
+            ]
           },
           "created_at": {
             "type": "integer",
             "description": "Unix timestamp in seconds.",
-            "examples": [1777299416]
+            "examples": [
+              1777299416
+            ]
           },
           "kind": {
             "type": "integer",
             "description": "4A event kind. 30500=Observation, 30501=Claim, 30502=Entity, 30503=Relation, 30504=Commons.",
             "minimum": 30500,
             "maximum": 30504,
-            "examples": [30502]
+            "examples": [
+              30502
+            ]
           },
           "tags": {
             "type": "array",
             "description": "Nostr tag array. Common 4A tags: `d` (stable slug), `alt` (human summary), `t` (topic), `a` (citation), `p` (referenced pubkey), `L`/`l` (NIP-32 label namespace + value).",
             "items": {
               "type": "array",
-              "items": { "type": "string" }
+              "items": {
+                "type": "string"
+              }
             },
-            "examples": [[["d", "4a-protocol"], ["alt", "Entity: 4A protocol"], ["t", "protocol"]]]
+            "examples": [
+              [
+                [
+                  "d",
+                  "4a-protocol"
+                ],
+                [
+                  "alt",
+                  "Entity: 4A protocol"
+                ],
+                [
+                  "t",
+                  "protocol"
+                ]
+              ]
+            ]
           },
           "content": {
             "type": "string",
             "description": "JSON-LD payload as a JSON-encoded string. Reference @context: https://4a4.ai/ns/v0.",
-            "examples": ["{\"@context\":\"https://4a4.ai/ns/v0\",\"@type\":\"Entity\",\"name\":\"4A\"}"]
+            "examples": [
+              "{\"@context\":\"https://4a4.ai/ns/v0\",\"@type\":\"Entity\",\"name\":\"4A\"}"
+            ]
           },
           "sig": {
             "type": "string",
@@ -251,144 +336,218 @@
       },
       "QueryResponse": {
         "type": "object",
-        "required": ["events", "count", "queriedAt"],
+        "required": [
+          "events",
+          "count",
+          "queriedAt"
+        ],
         "properties": {
           "events": {
             "type": "array",
             "description": "Matching events, newest first.",
-            "items": { "$ref": "#/components/schemas/Event" }
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
           },
           "count": {
             "type": "integer",
             "description": "Number of events returned (≤ requested limit).",
-            "examples": [12]
+            "examples": [
+              12
+            ]
           },
           "queriedAt": {
             "type": "string",
             "format": "date-time",
             "description": "ISO-8601 timestamp when the gateway answered.",
-            "examples": ["2026-04-27T15:17:26.021Z"]
+            "examples": [
+              "2026-04-27T15:17:26.021Z"
+            ]
           }
         }
       },
       "CommonsList": {
         "type": "object",
-        "required": ["commons", "count"],
+        "required": [
+          "commons",
+          "count"
+        ],
         "properties": {
           "commons": {
             "type": "array",
             "description": "Every Commons event the gateway knows about.",
-            "items": { "$ref": "#/components/schemas/Event" }
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
           },
           "count": {
             "type": "integer",
-            "examples": [3]
+            "examples": [
+              3
+            ]
           }
         }
       },
       "Score": {
         "type": "object",
         "description": "One credibility score from one aggregator.",
-        "required": ["aggregator", "kind", "namespace", "score", "publishedAt"],
+        "required": [
+          "aggregator",
+          "kind",
+          "namespace",
+          "score",
+          "publishedAt"
+        ],
         "properties": {
           "aggregator": {
             "type": "string",
             "description": "64-char hex pubkey of the aggregator that signed the assertion.",
-            "examples": ["abc123def4567890abc123def4567890abc123def4567890abc123def4567890"]
+            "examples": [
+              "abc123def4567890abc123def4567890abc123def4567890abc123def4567890"
+            ]
           },
           "kind": {
             "type": "integer",
             "description": "Nostr kind of the assertion event (NIP-85 = 30382).",
-            "examples": [30382]
+            "examples": [
+              30382
+            ]
           },
           "namespace": {
             "type": "string",
             "description": "Trust namespace this score applies to, e.g. `4a.publisher`, `web-of-trust`, `nostr.band/rank`.",
-            "examples": ["4a.publisher"]
+            "examples": [
+              "4a.publisher"
+            ]
           },
           "score": {
             "type": "number",
             "description": "Numeric score. Scale depends on aggregator (often 0..1 or 0..100).",
-            "examples": [0.87]
+            "examples": [
+              0.87
+            ]
           },
           "publishedAt": {
             "type": "integer",
             "description": "Unix timestamp (seconds) when the assertion was signed.",
-            "examples": [1777299416]
+            "examples": [
+              1777299416
+            ]
           }
         }
       },
       "CredibilityResponse": {
         "type": "object",
-        "required": ["pubkey", "scores", "queriedAt", "source"],
+        "required": [
+          "pubkey",
+          "scores",
+          "queriedAt",
+          "source"
+        ],
         "properties": {
           "pubkey": {
             "type": "string",
             "description": "The pubkey that was looked up (normalized to 64-char hex).",
-            "examples": ["abc123def4567890abc123def4567890abc123def4567890abc123def4567890"]
+            "examples": [
+              "abc123def4567890abc123def4567890abc123def4567890abc123def4567890"
+            ]
           },
           "scores": {
             "type": "array",
             "description": "Trust scores from the aggregator. Empty if no signal exists yet or if the aggregator was unreachable (see `warning`).",
-            "items": { "$ref": "#/components/schemas/Score" }
+            "items": {
+              "$ref": "#/components/schemas/Score"
+            }
           },
           "queriedAt": {
             "type": "string",
             "format": "date-time",
-            "examples": ["2026-04-27T15:17:26.021Z"]
+            "examples": [
+              "2026-04-27T15:17:26.021Z"
+            ]
           },
           "source": {
             "type": "string",
             "description": "Hostname of the aggregator relay that was queried.",
-            "examples": ["relay.nostr.band"]
+            "examples": [
+              "relay.nostr.band"
+            ]
           },
           "warning": {
             "type": "string",
             "description": "Present only if the aggregator could not be reached; explains why scores are empty.",
-            "examples": ["aggregator_unreachable: timeout"]
+            "examples": [
+              "aggregator_unreachable: timeout"
+            ]
           }
         }
       },
       "HealthResponse": {
         "type": "object",
-        "required": ["status", "version", "relays", "eventCount"],
+        "required": [
+          "status",
+          "version",
+          "relays",
+          "eventCount"
+        ],
         "properties": {
           "status": {
             "type": "string",
             "description": "Always `ok` when the gateway is up.",
-            "examples": ["ok"]
+            "examples": [
+              "ok"
+            ]
           },
           "version": {
             "type": "string",
             "description": "Gateway version.",
-            "examples": ["0.0.1"]
+            "examples": [
+              "0.0.1"
+            ]
           },
           "relays": {
             "type": "array",
             "description": "Nostr relay URLs the gateway is subscribed to.",
-            "items": { "type": "string" },
-            "examples": [["wss://relay.damus.io", "wss://nos.lol", "wss://relay.nostr.band"]]
+            "items": {
+              "type": "string"
+            },
+            "examples": [
+              [
+                "wss://relay.damus.io",
+                "wss://nos.lol",
+                "wss://relay.nostr.band"
+              ]
+            ]
           },
           "eventCount": {
             "type": "integer",
             "description": "Number of 4A events currently indexed.",
-            "examples": [4217]
+            "examples": [
+              4217
+            ]
           }
         }
       },
       "Error": {
         "type": "object",
-        "required": ["error", "message"],
+        "required": [
+          "error",
+          "message"
+        ],
         "properties": {
           "error": {
             "type": "string",
             "description": "Short machine-readable error code.",
-            "examples": ["bad_request"]
+            "examples": [
+              "bad_request"
+            ]
           },
           "message": {
             "type": "string",
             "description": "Human-readable explanation.",
-            "examples": ["unknown kind 'foo' — try observation|claim|entity|relation|commons"]
+            "examples": [
+              "unknown kind 'foo' — try observation|claim|entity|relation|commons"
+            ]
           }
         }
       }
