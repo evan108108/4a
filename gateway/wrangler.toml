@@ -1,0 +1,30 @@
+# 4A gateway — Cloudflare Worker config
+#
+# Single Worker handling all 4A routes:
+#   - apex (4a4.ai/*) serves the JSON-LD context document and the public landing
+#   - api.4a4.ai/* will host the read API (Day 3+)
+#   - mcp.4a4.ai/* will host the MCP/SSE adapter (Day 3+)
+#
+# Account ID and credentials come from /Users/evan/projects/4a/.env via bin/wrangler.
+# Do NOT hardcode account_id here; bin/wrangler injects CLOUDFLARE_ACCOUNT_ID.
+
+name = "4a-gateway"
+main = "src/router.ts"
+compatibility_date = "2026-04-27"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+
+# Bind the worker to the three zones.
+# Each route uses zone_name (not zone_id) so wrangler resolves the zone via the
+# account context.
+[[routes]]
+pattern = "4a4.ai/*"
+zone_name = "4a4.ai"
+
+[[routes]]
+pattern = "mcp.4a4.ai/*"
+zone_name = "4a4.ai"
+
+[[routes]]
+pattern = "api.4a4.ai/*"
+zone_name = "4a4.ai"

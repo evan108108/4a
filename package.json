@@ -1,0 +1,21 @@
+{
+  "name": "4a",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Reference implementation for 4A — Agent-Agnostic Accessible Archive. A convention on Nostr for AI-mediated public knowledge exchange.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "wrangler dev --config gateway/wrangler.toml",
+    "deploy": "wrangler deploy --config gateway/wrangler.toml",
+    "tail": "wrangler tail --config gateway/wrangler.toml"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260426.1",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.85.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
