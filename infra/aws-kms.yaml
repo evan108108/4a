@@ -75,6 +75,8 @@ Resources:
 
   DerivationKeyAlias:
     Type: AWS::KMS::Alias
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       AliasName: !Sub "alias/${KeyAlias}"
       TargetKeyId: !Ref DerivationKey
@@ -93,6 +95,8 @@ Resources:
 
   GatewayUserPolicy:
     Type: AWS::IAM::UserPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       UserName: !Ref GatewayUser
       PolicyName: 4a-gateway-kms-derivation

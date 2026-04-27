@@ -51,14 +51,15 @@ aws cloudformation create-change-set \
   --resources-to-import '[
     {"ResourceType":"AWS::KMS::Key","LogicalResourceId":"DerivationKey","ResourceIdentifier":{"KeyId":"<key-uuid>"}},
     {"ResourceType":"AWS::KMS::Alias","LogicalResourceId":"DerivationKeyAlias","ResourceIdentifier":{"AliasName":"alias/4a-derivation-v1"}},
-    {"ResourceType":"AWS::IAM::User","LogicalResourceId":"GatewayUser","ResourceIdentifier":{"UserName":"4a-gateway-worker"}}
+    {"ResourceType":"AWS::IAM::User","LogicalResourceId":"GatewayUser","ResourceIdentifier":{"UserName":"4a-gateway-worker"}},
+    {"ResourceType":"AWS::IAM::UserPolicy","LogicalResourceId":"GatewayUserPolicy","ResourceIdentifier":{"UserName":"4a-gateway-worker","PolicyName":"4a-gateway-kms-derivation"}}
   ]' \
   --template-body file://infra/aws-kms.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
   --region us-east-1
 ```
 
-Inspect the change set, then execute it. The inline `GatewayUserPolicy` is created by the import, not imported (CFN re-applies it idempotently).
+Inspect the change set, then execute it. All four resources (key, alias, user, inline user-policy) are imported — CFN refuses to create a change set unless every resource defined in the template is either being imported or already in the stack.
 
 ## Rotation
 
