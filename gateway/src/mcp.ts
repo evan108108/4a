@@ -15,10 +15,12 @@
 
 import { DurableObject } from "cloudflare:workers";
 import pkg from "../../package.json";
+import { verifyJwt, type AuthClaims } from "./auth";
 import { handleCredibility, normalizePubkey } from "./credibility";
+import { runPublish, type Kind as PublishKind, type PublishEnv } from "./publish";
 import type { NostrEvent, QueryFilter, RelayPool } from "./relay-pool";
 
-interface McpEnv {
+interface McpEnv extends PublishEnv {
   RELAY_POOL: DurableObjectNamespace<RelayPool>;
   MCP_HUB: DurableObjectNamespace<McpHub>;
 }
@@ -77,6 +79,10 @@ interface Session {
   writer: WritableStreamDefaultWriter<Uint8Array>;
   encoder: TextEncoder;
   heartbeat: ReturnType<typeof setInterval>;
+  // Populated when the SSE handshake carries an `Authorization: Bearer <jwt>`
+  // header, or when the client later calls the `auth_4a` tool. Required for
+  // any of the publish_* / attest write tools.
+  claims?: AuthClaims;
 }
 
 // Sessions live on the McpHub DO instance below — no module-scope storage.
@@ -166,6 +172,177 @@ const TOOLS: ToolDef[] = [
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     examples: [{ name: "list_commons", arguments: {} }],
   },
+  {
+    name: "auth_4a",
+    description:
+      "Attach a 4A bearer JWT to this MCP session so the publish_* and attest tools can sign on your behalf. Use only when your MCP client cannot pass an Authorization header on the /sse handshake. Obtain the JWT by completing the OAuth flow at https://api.4a4.ai/auth/github/start.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        jwt: { type: "string", description: "4A-issued JWT (HS256) from /auth/github/callback" },
+      },
+      required: ["jwt"],
+      additionalProperties: false,
+    },
+    examples: [{ name: "auth_4a", arguments: { jwt: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...." } }],
+  },
+  {
+    name: "publish_observation",
+    description:
+      "Publish a 4A Observation event signed by your custodial Nostr key. Use when the user makes a verifiable claim about a software project, library, person, or organization that's worth committing to the public knowledge graph. Provide 'about' (URI of subject), 'property' (the aspect you're observing), 'value' (the claim itself), and 'derivedFrom' (citation URLs). Requires an authenticated session — see auth_4a.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        about: { type: "string", description: "Subject URI or kind:pubkey:d address" },
+        property: { type: "string", description: "Aspect being observed (e.g. 'license', 'maintainer-status')" },
+        value: { type: "string", description: "The observed value" },
+        derivedFrom: {
+          type: "array",
+          items: { type: "string" },
+          description: "Citation URIs supporting the observation",
+        },
+        topic: { type: "array", items: { type: "string" }, description: "Topic slugs (#t tags)" },
+        dSlug: { type: "string", description: "Override the auto-generated d-tag" },
+      },
+      required: ["about", "property", "value"],
+      additionalProperties: false,
+    },
+    examples: [
+      {
+        name: "publish_observation",
+        arguments: {
+          about: "https://github.com/rails/rails",
+          property: "primary-language",
+          value: "Ruby",
+          derivedFrom: ["https://github.com/rails/rails/blob/main/Gemfile"],
+        },
+      },
+    ],
+  },
+  {
+    name: "publish_claim",
+    description:
+      "Publish a 4A Claim event — a textual assertion with optional citations, signed by your custodial Nostr key. Use for prose-shaped statements about a subject (review, summary, evaluation). Provide 'about' (URI of subject), 'appearance' (the claim text), and optional 'citation' URIs. Requires an authenticated session — see auth_4a.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        about: { type: "string", description: "Subject URI or kind:pubkey:d address" },
+        appearance: { type: "string", description: "The claim text as it should appear" },
+        citation: {
+          type: "array",
+          items: { type: "string" },
+          description: "Citation URIs (URLs or kind:pubkey:d addresses)",
+        },
+        topic: { type: "array", items: { type: "string" }, description: "Topic slugs (#t tags)" },
+        dSlug: { type: "string", description: "Override the auto-generated d-tag" },
+      },
+      required: ["about", "appearance"],
+      additionalProperties: false,
+    },
+    examples: [
+      {
+        name: "publish_claim",
+        arguments: {
+          about: "https://github.com/sveltejs/svelte",
+          appearance: "Svelte 5 runes simplify reactive state management compared to stores.",
+          citation: ["https://svelte.dev/blog/runes"],
+        },
+      },
+    ],
+  },
+  {
+    name: "publish_entity",
+    description:
+      "Publish a 4A Entity declaration — registers a software project, person, or organization in the knowledge graph under your custodial Nostr key. Provide 'canonicalId' (the canonical URI), 'name', and optional 'description', 'codeRepository', 'programmingLanguage', and additional 'types'. Requires an authenticated session — see auth_4a.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        canonicalId: { type: "string", description: "Canonical URI for the entity" },
+        name: { type: "string", description: "Human-readable name" },
+        description: { type: "string", description: "Short description" },
+        codeRepository: { type: "string", description: "Repository URL (for software projects)" },
+        programmingLanguage: { type: "string", description: "Primary language (for software projects)" },
+        types: {
+          type: "array",
+          items: { type: "string" },
+          description: "Additional schema.org types beyond 'Thing' (e.g. 'SoftwareSourceCode', 'Organization')",
+        },
+        topic: { type: "array", items: { type: "string" }, description: "Topic slugs (#t tags)" },
+        dSlug: { type: "string", description: "Override the auto-generated d-tag" },
+      },
+      required: ["canonicalId", "name"],
+      additionalProperties: false,
+    },
+    examples: [
+      {
+        name: "publish_entity",
+        arguments: {
+          canonicalId: "https://github.com/sveltejs/svelte",
+          name: "Svelte",
+          description: "A web UI framework that compiles to vanilla JS at build time.",
+          codeRepository: "https://github.com/sveltejs/svelte",
+          programmingLanguage: "TypeScript",
+          types: ["SoftwareSourceCode"],
+        },
+      },
+    ],
+  },
+  {
+    name: "publish_relation",
+    description:
+      "Publish a 4A Relation event — asserts a typed relationship between two entities (e.g. 'maintainer', 'depends-on', 'employs'), signed by your custodial Nostr key. Provide 'subject' URI, 'object' URI, and 'roleName'. Requires an authenticated session — see auth_4a.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        subject: { type: "string", description: "Subject URI (the actor of the role)" },
+        object: { type: "string", description: "Object URI (the target of the role)" },
+        roleName: { type: "string", description: "Role name (e.g. 'maintainer', 'depends-on')" },
+        startDate: { type: "string", description: "ISO date the relation began (optional)" },
+        endDate: { type: "string", description: "ISO date the relation ended (optional)" },
+        dSlug: { type: "string", description: "Override the auto-generated d-tag" },
+      },
+      required: ["subject", "object", "roleName"],
+      additionalProperties: false,
+    },
+    examples: [
+      {
+        name: "publish_relation",
+        arguments: {
+          subject: "https://github.com/dhh",
+          object: "https://github.com/rails/rails",
+          roleName: "maintainer",
+        },
+      },
+    ],
+  },
+  {
+    name: "attest",
+    description:
+      "Publish a NIP-32 label (kind 1985) attesting to a 4A subject under a namespaced predicate. Use for credibility assertions, stamps, or sponsor declarations. 'subject' is a 64-char hex pubkey or event id; 'namespace' must match 4a.credibility.<domain> | 4a.stamp.<source> | 4a.sponsor; 'value' is optional and namespace-scoped. Requires an authenticated session — see auth_4a.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        subject: { type: "string", description: "64-char hex pubkey or event id" },
+        namespace: {
+          type: "string",
+          description: "Namespace: 4a.credibility.<domain> | 4a.stamp.<source> | 4a.sponsor",
+        },
+        value: { type: "string", description: "Optional namespace-scoped value (defaults sensibly)" },
+      },
+      required: ["subject", "namespace"],
+      additionalProperties: false,
+    },
+    examples: [
+      {
+        name: "attest",
+        arguments: {
+          subject: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          namespace: "4a.credibility.security-review",
+          value: "passed",
+        },
+      },
+    ],
+  },
 ];
 
 function getPool(env: McpEnv): DurableObjectStub<RelayPool> {
@@ -180,6 +357,7 @@ async function callTool(
   name: string,
   args: Record<string, unknown>,
   env: McpEnv,
+  session: Session,
 ): Promise<unknown> {
   switch (name) {
     case "query_4a":
@@ -190,9 +368,73 @@ async function callTool(
       return runCredibility(args);
     case "list_commons":
       return runListCommons(env);
+    case "auth_4a":
+      return runAuth(args, env, session);
+    case "publish_observation":
+      return runPublishTool("observation", args, env, session);
+    case "publish_claim":
+      return runPublishTool("claim", args, env, session);
+    case "publish_entity":
+      return runPublishTool("entity", args, env, session);
+    case "publish_relation":
+      return runPublishTool("relation", args, env, session);
+    case "attest":
+      return runPublishTool("attest", args, env, session);
     default:
       throw rpcError(METHOD_NOT_FOUND, `unknown tool: ${name}`);
   }
+}
+
+async function runAuth(
+  args: Record<string, unknown>,
+  env: McpEnv,
+  session: Session,
+): Promise<unknown> {
+  if (typeof args.jwt !== "string" || args.jwt.length === 0) {
+    throw rpcError(INVALID_PARAMS, "jwt is required");
+  }
+  const claims = await verifyJwt(args.jwt, env);
+  if (!claims) {
+    throw rpcError(
+      INVALID_PARAMS,
+      "invalid or expired token — obtain a fresh one at https://api.4a4.ai/auth/github/start",
+    );
+  }
+  session.claims = claims;
+  return {
+    ok: true,
+    provider: claims.provider,
+    login: claims.login,
+    expiresAt: new Date(claims.exp * 1000).toISOString(),
+  };
+}
+
+async function runPublishTool(
+  kind: PublishKind,
+  args: Record<string, unknown>,
+  env: McpEnv,
+  session: Session,
+): Promise<unknown> {
+  if (!session.claims) {
+    throw rpcError(
+      INVALID_REQUEST,
+      "not authenticated — pass `Authorization: Bearer <jwt>` on the GET /sse handshake, or call the `auth_4a` tool with a JWT obtained from https://api.4a4.ai/auth/github/start",
+    );
+  }
+  const result = await runPublish(kind, args, session.claims, env);
+  if (!result.ok) {
+    const code = result.status === 400 ? INVALID_PARAMS : INTERNAL_ERROR;
+    throw rpcError(code, result.message, { error: result.error, ...(result.extra ?? {}) });
+  }
+  return {
+    ok: true,
+    eventId: result.eventId,
+    address: result.address,
+    kind: result.kind,
+    pubkey: result.pubkey,
+    npub: result.npub,
+    relayResults: result.relayResults,
+  };
 }
 
 async function runQuery(args: Record<string, unknown>, env: McpEnv): Promise<unknown> {
@@ -286,7 +528,11 @@ function jsonRpcFailure(id: unknown, error: JsonRpcError) {
   return { jsonrpc: "2.0" as const, id, error };
 }
 
-async function dispatch(msg: JsonRpcRequest, env: McpEnv): Promise<unknown | null> {
+async function dispatch(
+  msg: JsonRpcRequest,
+  env: McpEnv,
+  session: Session,
+): Promise<unknown | null> {
   const isNotification = msg.id === undefined || msg.id === null;
   const id = msg.id ?? null;
   const method = msg.method;
@@ -324,7 +570,7 @@ async function dispatch(msg: JsonRpcRequest, env: McpEnv): Promise<unknown | nul
             ? (params.arguments as Record<string, unknown>)
             : {};
         try {
-          const data = await callTool(toolName, toolArgs, env);
+          const data = await callTool(toolName, toolArgs, env, session);
           result = {
             content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
             isError: false,
@@ -402,7 +648,7 @@ export class McpHub extends DurableObject<McpEnv> {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    if (path === "/sse" && request.method === "GET") return this.handleOpen(request);
+    if (path === "/sse" && request.method === "GET") return await this.handleOpen(request);
     if (path === "/messages" && request.method === "POST") return this.handleMessage(request);
     if ((path === "/" || path === "/health") && request.method === "GET") {
       return jsonResponse({
@@ -440,7 +686,28 @@ export class McpHub extends DurableObject<McpEnv> {
     }
   }
 
-  private handleOpen(request: Request): Response {
+  private async handleOpen(request: Request): Promise<Response> {
+    // Optional bearer auth on the SSE handshake: a present-but-invalid token
+    // is a hard 401, but a missing token opens the session for read-only
+    // tools — clients can still call `auth_4a` later to attach a JWT.
+    let claims: AuthClaims | undefined;
+    const auth = request.headers.get("Authorization");
+    if (auth && auth.startsWith("Bearer ")) {
+      const token = auth.slice("Bearer ".length).trim();
+      const verified = await verifyJwt(token, this.env);
+      if (!verified) {
+        return jsonResponse(
+          {
+            error: "unauthorized",
+            message:
+              "invalid or expired Authorization bearer token — obtain a fresh JWT at https://api.4a4.ai/auth/github/start",
+          },
+          401,
+        );
+      }
+      claims = verified;
+    }
+
     const sessionId = newSessionId();
     const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
     const writer = writable.getWriter();
@@ -452,7 +719,7 @@ export class McpHub extends DurableObject<McpEnv> {
         .catch(() => this.closeSession(sessionId));
     }, HEARTBEAT_MS);
 
-    this.sessions.set(sessionId, { writer, encoder, heartbeat });
+    this.sessions.set(sessionId, { writer, encoder, heartbeat, claims });
 
     // Fire-and-forget — awaiting before returning the Response would deadlock
     // because the readable side isn't being consumed yet.
@@ -517,7 +784,7 @@ export class McpHub extends DurableObject<McpEnv> {
         );
         continue;
       }
-      const response = await dispatch(raw as JsonRpcRequest, this.env);
+      const response = await dispatch(raw as JsonRpcRequest, this.env, session);
       if (response !== null) await this.emit(session, response);
     }
 

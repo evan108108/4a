@@ -468,7 +468,7 @@ function arrayOfNonEmptyStrings(value: unknown, field: string): string[] {
 
 // ─── core dispatch ──────────────────────────────────────────────────────────
 
-type Kind = "observation" | "claim" | "entity" | "relation" | "attest";
+export type Kind = "observation" | "claim" | "entity" | "relation" | "attest";
 
 function dispatchKind(kind: Kind, body: Record<string, unknown>, pubkey: string): BuiltEvent {
   switch (kind) {
@@ -480,6 +480,100 @@ function dispatchKind(kind: Kind, body: Record<string, unknown>, pubkey: string)
   }
 }
 
+export interface PublishSuccess {
+  ok: true;
+  eventId: string;
+  address: string | null;
+  kind: number;
+  pubkey: string;
+  npub: string;
+  relayResults: RelayResult[];
+}
+
+export interface PublishFailure {
+  ok: false;
+  status: number;
+  error: string;
+  message: string;
+  extra?: Record<string, unknown>;
+}
+
+export type PublishResult = PublishSuccess | PublishFailure;
+
+// Shared core used by both the HTTP handler and the MCP write tools. Auth is
+// already resolved (claims passed in); body is already a parsed JSON object.
+export async function runPublish(
+  kind: Kind,
+  body: Record<string, unknown>,
+  claims: AuthClaims,
+  env: PublishEnv,
+): Promise<PublishResult> {
+  const rateKey = `${claims.provider}:${claims.oauth_id}`;
+  const rl = rateLimitCheck(rateKey);
+  if (!rl.ok) {
+    return {
+      ok: false,
+      status: 429,
+      error: "rate_limited",
+      message: `max ${RATE_LIMIT_PER_HOUR} publishes/hour per identity`,
+      extra: { retryAfterMs: rl.retryAfterMs },
+    };
+  }
+
+  try {
+    // Pre-derive the pubkey so we can stamp it into payloads (agent / author /
+    // wasAttributedTo). signEventWithDerivedKey re-derives — that's two KMS
+    // calls per publish; acceptable for v0, cache later if it bites.
+    const identity = { provider: claims.provider, oauth_id: claims.oauth_id };
+    const { publicKey, secretKey } = await deriveNostrKey(identity, env);
+    secretKey.fill(0);
+
+    const built = dispatchKind(kind, body, publicKey);
+    if (new TextEncoder().encode(built.template.content).byteLength > MAX_CONTENT_BYTES) {
+      return {
+        ok: false,
+        status: 413,
+        error: "payload_too_large",
+        message: `content exceeds ${MAX_CONTENT_BYTES} bytes`,
+      };
+    }
+
+    const signed: SignedEvent = await signEventWithDerivedKey(built.template, identity, env);
+    const relayResults = await fanOut(signed);
+    const accepted = relayResults.filter((r) => r.accepted).length;
+    if (accepted === 0) {
+      return {
+        ok: false,
+        status: 502,
+        error: "relay_failure",
+        message: "no relays accepted the event",
+        extra: { relayResults },
+      };
+    }
+    const npub = nip19.npubEncode(signed.pubkey);
+    const address = built.addressable ? `${signed.kind}:${signed.pubkey}:${built.dTag}` : null;
+    return {
+      ok: true,
+      eventId: signed.id,
+      address,
+      kind: signed.kind,
+      pubkey: signed.pubkey,
+      npub,
+      relayResults,
+    };
+  } catch (err) {
+    if (err instanceof ValidationError) {
+      return { ok: false, status: 400, error: "bad_request", message: err.message };
+    }
+    return {
+      ok: false,
+      status: 500,
+      error: "internal_error",
+      message: err instanceof Error ? err.message : "publish failed",
+    };
+  }
+}
+
 async function handleKind(kind: Kind, request: Request, env: PublishEnv): Promise<Response> {
   const auth = request.headers.get("Authorization");
   if (!auth || !auth.startsWith("Bearer ")) {
@@ -487,18 +581,6 @@ async function handleKind(kind: Kind, request: Request, env: PublishEnv): Promis
   }
   const claims = await verifyJwt(auth.slice("Bearer ".length).trim(), env);
   if (!claims) return jsonError("unauthorized", "invalid or expired token", 401);
-
-  // Rate-limit before any KMS work. JWT subject is the rate key.
-  const rateKey = `${claims.provider}:${claims.oauth_id}`;
-  const rl = rateLimitCheck(rateKey);
-  if (!rl.ok) {
-    return jsonError(
-      "rate_limited",
-      `max ${RATE_LIMIT_PER_HOUR} publishes/hour per identity`,
-      429,
-      { retryAfterMs: rl.retryAfterMs },
-    );
-  }
 
   let body: unknown;
   try {
@@ -510,42 +592,19 @@ async function handleKind(kind: Kind, request: Request, env: PublishEnv): Promis
     return jsonError("bad_request", "request body must be a JSON object", 400);
   }
 
-  try {
-    // Pre-derive the pubkey so we can stamp it into payloads (agent / author /
-    // wasAttributedTo). signEventWithDerivedKey re-derives — that's two KMS
-    // calls per publish; acceptable for v0, cache later if it bites.
-    const identity = { provider: claims.provider, oauth_id: claims.oauth_id };
-    const { publicKey, secretKey } = await deriveNostrKey(identity, env);
-    secretKey.fill(0);
-
-    const built = dispatchKind(kind, body as Record<string, unknown>, publicKey);
-    if (new TextEncoder().encode(built.template.content).byteLength > MAX_CONTENT_BYTES) {
-      return jsonError("payload_too_large", `content exceeds ${MAX_CONTENT_BYTES} bytes`, 413);
-    }
-
-    const signed: SignedEvent = await signEventWithDerivedKey(built.template, identity, env);
-    const relayResults = await fanOut(signed);
-    const accepted = relayResults.filter((r) => r.accepted).length;
-    if (accepted === 0) {
-      return jsonError("relay_failure", "no relays accepted the event", 502, { relayResults });
-    }
-    const npub = nip19.npubEncode(signed.pubkey);
-    const address = built.addressable ? `${signed.kind}:${signed.pubkey}:${built.dTag}` : null;
-    return jsonResponse({
-      ok: true,
-      eventId: signed.id,
-      address,
-      kind: signed.kind,
-      pubkey: signed.pubkey,
-      npub,
-      relayResults,
-    });
-  } catch (err) {
-    if (err instanceof ValidationError) {
-      return jsonError("bad_request", err.message, 400);
-    }
-    return jsonError("internal_error", err instanceof Error ? err.message : "publish failed", 500);
+  const result = await runPublish(kind, body as Record<string, unknown>, claims, env);
+  if (!result.ok) {
+    return jsonError(result.error, result.message, result.status, result.extra);
   }
+  return jsonResponse({
+    ok: true,
+    eventId: result.eventId,
+    address: result.address,
+    kind: result.kind,
+    pubkey: result.pubkey,
+    npub: result.npub,
+    relayResults: result.relayResults,
+  });
 }
 
 // ─── exported request handler ───────────────────────────────────────────────
