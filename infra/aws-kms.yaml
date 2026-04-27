@@ -1,0 +1,121 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  4A Phase 2 — AWS KMS HMAC derivation key + scoped IAM user for the
+  Cloudflare Worker gateway. Replaces the manual runbook in
+  docs/phase-2-aws-setup.md.
+
+  Resources:
+    - KMS HMAC-SHA256 key (alias/4a-derivation-v1) for deterministic
+      Nostr keypair derivation from OAuth identity.
+    - IAM user 4a-gateway-worker with a single inline policy granting
+      kms:GenerateMac on exactly the above key.
+    - Key policy: root admin + gateway-worker GenerateMac allow + an
+      explicit deny on every other action for the gateway-worker
+      principal (defense-in-depth).
+
+  Not in this template (intentionally):
+    - The IAM access key (AWS::IAM::AccessKey). Access keys are
+      one-shot secrets — letting CloudFormation manage them means a
+      stack drift triggers rotation that invalidates the live worker
+      credentials. Issue + rotate access keys out-of-band via the
+      `infra:keys:rotate` script.
+    - The Cloudflare Worker secrets. Those are set via wrangler.
+
+Parameters:
+  KeyAlias:
+    Type: String
+    Default: 4a-derivation-v1
+    Description: KMS alias suffix (will be prefixed with alias/).
+  GatewayUserName:
+    Type: String
+    Default: 4a-gateway-worker
+    Description: IAM user name the Cloudflare Worker authenticates as.
+
+Resources:
+  DerivationKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: >-
+        4A custodial Nostr key derivation. HMAC-SHA-256 over
+        oauth_provider:oauth_user_id. Do not delete or rotate without
+        reading docs/phase-2-aws-setup.md section 8.
+      KeyUsage: GENERATE_VERIFY_MAC
+      KeySpec: HMAC_256
+      MultiRegion: false
+      EnableKeyRotation: false
+      Tags:
+        - Key: project
+          Value: 4a
+        - Key: purpose
+          Value: nostr-derivation
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: 4a-derivation-v1-key-policy
+        Statement:
+          - Sid: EnableRootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowGatewayWorkerToDeriveOnly
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt GatewayUser.Arn
+            Action: kms:GenerateMac
+            Resource: "*"
+          - Sid: DenyEverythingElseToGatewayWorker
+            Effect: Deny
+            Principal:
+              AWS: !GetAtt GatewayUser.Arn
+            NotAction: kms:GenerateMac
+            Resource: "*"
+
+  DerivationKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${KeyAlias}"
+      TargetKeyId: !Ref DerivationKey
+
+  GatewayUser:
+    Type: AWS::IAM::User
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      UserName: !Ref GatewayUserName
+      Tags:
+        - Key: project
+          Value: 4a
+        - Key: purpose
+          Value: cloudflare-worker-kms-derivation
+
+  GatewayUserPolicy:
+    Type: AWS::IAM::UserPolicy
+    Properties:
+      UserName: !Ref GatewayUser
+      PolicyName: 4a-gateway-kms-derivation
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowDerivationOnly
+            Effect: Allow
+            Action: kms:GenerateMac
+            Resource: !GetAtt DerivationKey.Arn
+
+Outputs:
+  KeyArn:
+    Value: !GetAtt DerivationKey.Arn
+    Description: KMS_DERIVATION_KEY_ID — copy into /Users/evan/projects/4a/.env and set as a wrangler secret.
+    Export:
+      Name: !Sub "${AWS::StackName}-KeyArn"
+  KeyAliasName:
+    Value: !Sub "alias/${KeyAlias}"
+    Description: Human-friendly alias used by AWS CLI in the verification checks.
+  GatewayUserArn:
+    Value: !GetAtt GatewayUser.Arn
+    Description: IAM user the Cloudflare Worker authenticates as.
+  Region:
+    Value: !Ref AWS::Region
+    Description: AWS_REGION — copy into /Users/evan/projects/4a/.env.
