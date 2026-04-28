@@ -422,7 +422,7 @@
       "post": {
         "operationId": "publishScore",
         "summary": "Publish a paired 4A score and rationale",
-        "description": "Publish a 4A Score (kind 30506) atomically paired with a rationale Comment (kind 30507) per SPEC.md §Credibility events. The gateway signs both events under the caller's 4A pubkey and fans them out to the configured relays. Per the Phase 3 paired-rationale rule (§4.1), aggregators treat unjustified scores as weight-zero — this endpoint exists so callers don't accidentally publish unpaired scores. Requires the `publish` OAuth scope.",
+        "description": "Publish a 4A Score (kind 30506) atomically paired with a rationale Comment (kind 30507). Both events are signed under the caller's 4A pubkey and fanned out to relays. Aggregators treat unjustified scores as weight-zero per the paired-rationale rule. Requires `publish` OAuth scope.",
         "security": [{ "oauth2": ["publish"] }],
         "requestBody": {
           "required": true,
@@ -467,6 +467,64 @@
           },
           "502": {
             "description": "No relays accepted the score event; the rationale comment was not published.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/comment": {
+      "post": {
+        "operationId": "publishComment",
+        "summary": "Publish a standalone 4A comment",
+        "description": "Publish a 4A Comment (kind 30507) targeting any 4A event — claim, score, or other comment. Standalone path (no paired score). NIP-10 root/reply markers are added to e-tags when reply_to_event_id is provided. Requires `publish` OAuth scope.",
+        "security": [{ "oauth2": ["publish"] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CommentBody" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Comment event signed and accepted by at least one relay.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CommentPublishResult" }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error: `body` empty/whitespace, `target_event_id` not 64-char hex, `reply_to_event_id` not 64-char hex, or `target_a_tag` not a kind:pubkey:d address.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid OAuth token.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "429": {
+            "description": "Per-identity publish rate limit exceeded.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "502": {
+            "description": "No relays accepted the comment event.",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/Error" }
@@ -1127,6 +1185,102 @@
                 "items": { "$ref": "#/components/schemas/RelayResult" }
               }
             }
+          }
+        }
+      },
+      "CommentBody": {
+        "type": "object",
+        "description": "Body for POST /v0/comment. The gateway publishes a kind:30507 Comment event under the caller's 4A pubkey. The `d` tag is `comment-<random-8hex>` per call. When `reply_to_event_id` is present, the target is tagged with the NIP-10 `root` marker and the parent comment with the `reply` marker; otherwise a single bare `e` tag points at the target.",
+        "required": [
+          "target_event_id",
+          "body"
+        ],
+        "properties": {
+          "target_event_id": {
+            "type": "string",
+            "description": "64-char lowercase hex Nostr event id of the event being commented on. May be a claim, score, observation, entity, relation, commons, or another comment.",
+            "examples": [
+              "9f8e7d6c5b4a39281706f5e4d3c2b1a0908070605040302010f0e0d0c0b0a090"
+            ]
+          },
+          "body": {
+            "type": "string",
+            "description": "Prose body of the comment. CommonMark Markdown is allowed per SPEC stub §3.1. Must be non-empty after trim.",
+            "examples": [
+              "Worth re-running this benchmark on the cold-start path before settling the value."
+            ]
+          },
+          "intent": {
+            "type": "string",
+            "description": "Optional one-token intent classifier embedded in the comment's JSON-LD content (e.g. `justify`, `challenge`, `clarify`).",
+            "examples": [
+              "challenge"
+            ]
+          },
+          "reply_to_event_id": {
+            "type": "string",
+            "description": "Optional 64-char hex event id of the parent comment when this comment is a reply within a thread. Triggers NIP-10 marker tags: target gets `root`, parent gets `reply`.",
+            "examples": [
+              "1a2b3c4d5e6f7890abcdef1234567890abcdef1234567890abcdef1234567890"
+            ]
+          },
+          "target_a_tag": {
+            "type": "string",
+            "description": "Optional `kind:pubkey:d` address of the target when it is itself an addressable 4A object. When present, copied into the comment's `a` tag alongside the `e` tag.",
+            "examples": [
+              "30501:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210:next-jit-claim-1"
+            ]
+          }
+        }
+      },
+      "CommentPublishResult": {
+        "type": "object",
+        "description": "Successful standalone-comment publish response. The kind:30507 event is signed and at least one relay accepted it. Entries in `relay_acks` with status `rate-limited-retrying` will be retried by the gateway in the background.",
+        "required": [
+          "ok",
+          "comment_event_id",
+          "address",
+          "kind",
+          "pubkey",
+          "npub",
+          "relay_acks"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "examples": [true]
+          },
+          "comment_event_id": {
+            "type": "string",
+            "description": "64-char hex Nostr event id of the published kind:30507 comment.",
+            "examples": [
+              "1a2b3c4d5e6f7890abcdef1234567890abcdef1234567890abcdef1234567890"
+            ]
+          },
+          "address": {
+            "type": "string",
+            "description": "Addressable identifier `30507:<caller-pubkey>:comment-<random-8hex>` for the comment.",
+            "examples": [
+              "30507:abc123def4567890abc123def4567890abc123def4567890abc123def4567890:comment-7f3c2a1b"
+            ]
+          },
+          "kind": {
+            "type": "integer",
+            "description": "Always 30507 for /v0/comment responses.",
+            "examples": [30507]
+          },
+          "pubkey": {
+            "type": "string",
+            "description": "Caller's derived 64-char hex 4A pubkey."
+          },
+          "npub": {
+            "type": "string",
+            "description": "Caller's pubkey encoded as bech32 npub."
+          },
+          "relay_acks": {
+            "type": "array",
+            "description": "Per-relay acknowledgment outcomes for the comment publish.",
+            "items": { "$ref": "#/components/schemas/RelayResult" }
           }
         }
       },

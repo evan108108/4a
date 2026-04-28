@@ -518,7 +518,7 @@ async function runPublishTool(
   if (!session.claims) {
     throw rpcError(
       INVALID_REQUEST,
-      "not authenticated — pass `Authorization: Bearer <jwt>` on the GET /sse handshake, or call the `auth_4a` tool with a JWT obtained from https://api.4a4.ai/auth/github/start",
+      "not authenticated — clients that support OAuth discovery can fetch https://mcp.4a4.ai/.well-known/oauth-protected-resource and run the standard authorization-code flow. Otherwise: pass `Authorization: Bearer <jwt>` on the GET /sse handshake, or call the `auth_4a` tool with a JWT obtained from https://api.4a4.ai/auth/google/start",
     );
   }
   const result = await runPublish(kind, args, session.claims, env);
@@ -860,25 +860,40 @@ export class McpHub extends DurableObject<McpEnv> {
   }
 
   private async handleOpen(request: Request): Promise<Response> {
-    // Optional bearer auth on the SSE handshake: a present-but-invalid token
-    // is a hard 401, but a missing token opens the session for read-only
-    // tools — clients can still call `auth_4a` later to attach a JWT.
-    let claims: AuthClaims | undefined;
+    // /sse requires Bearer auth on the handshake — a missing or invalid
+    // bearer triggers a 401 with WWW-Authenticate so MCP clients run the
+    // standard OAuth discovery+authorization flow before the session opens.
+    // Public read access is still available at api.4a4.ai/v0/* (no auth).
     const auth = request.headers.get("Authorization");
-    if (auth && auth.startsWith("Bearer ")) {
-      const token = auth.slice("Bearer ".length).trim();
-      const verified = await verifyJwt(token, this.env);
-      if (!verified) {
-        return jsonResponse(
-          {
-            error: "unauthorized",
-            message:
-              "invalid or expired Authorization bearer token — obtain a fresh JWT at https://api.4a4.ai/auth/github/start",
+    const bearer = auth && auth.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : "";
+    let claims: AuthClaims | undefined;
+    if (bearer) {
+      const verified = await verifyJwt(bearer, this.env);
+      if (verified) claims = verified;
+    }
+    if (!claims) {
+      // RFC 9728 §5.1 — point clients at the protected-resource metadata so
+      // they can discover the authorization server without out-of-band config.
+      const errorTag = bearer ? "invalid_token" : "missing_token";
+      const desc = bearer ? "invalid or expired bearer token" : "authentication required";
+      const wwwAuth =
+        `Bearer error="${errorTag}", error_description="${desc}", ` +
+        'resource_metadata="https://mcp.4a4.ai/.well-known/oauth-protected-resource"';
+      return new Response(
+        JSON.stringify({
+          error: "unauthorized",
+          message:
+            "/sse requires an Authorization: Bearer <jwt> header. Clients that support OAuth discovery should fetch https://mcp.4a4.ai/.well-known/oauth-protected-resource and run the standard authorization-code flow.",
+        }),
+        {
+          status: 401,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "WWW-Authenticate": wwwAuth,
+            ...CORS_HEADERS,
           },
-          401,
-        );
-      }
-      claims = verified;
+        },
+      );
     }
 
     const sessionId = newSessionId();

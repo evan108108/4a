@@ -15,6 +15,7 @@
 import contextV0 from "../../context-v0.json";
 import { handleApiRequest } from "./api";
 import { handleAuthRequest } from "./auth";
+import { handleCommentRequest } from "./comment";
 import { handleMcpRequest } from "./mcp";
 import type { McpHub } from "./mcp";
 import { handlePublishRequest } from "./publish";
@@ -66,6 +67,9 @@ export default {
       }
       if (url.pathname === "/v0/score") {
         return handleScoreRequest(request, env);
+      }
+      if (url.pathname === "/v0/comment") {
+        return handleCommentRequest(request, env);
       }
       return handleApiRequest(request, env);
     }
