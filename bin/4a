@@ -1,0 +1,267 @@
+#!/usr/bin/env node
+// 4A CLI — subcommand dispatcher for the hosted gateway.
+//
+// Phase 3 v0 subcommands:
+//   4a score <event_id> --value <0..1> --rationale "<text>" [--tier <str>] [--intent <str>] [--a-tag <kind:pubkey:d>]
+//   4a comment <event_id> --body "<text>" [--intent <str>] [--reply-to <event_id>] [--a-tag <kind:pubkey:d>]
+//
+// Auth: reads a 4A bearer JWT from $FOUR_A_JWT (or $FOA_JWT, alias). Obtain
+// one via the OAuth flow at https://api.4a4.ai/auth/github/start (or the
+// equivalent google flow). The CLI passes it as `Authorization: Bearer <jwt>`
+// on every request — same gating as the hosted /v0/score and /v0/comment
+// endpoints used by the MCP `score` / `comment` tools.
+//
+// Gateway override: $FOUR_A_GATEWAY (defaults to https://api.4a4.ai).
+//
+// Exit codes: 0 on success, 1 on gateway/network error, 2 on bad usage.
+
+import { parseArgs } from "node:util";
+
+const DEFAULT_GATEWAY = "https://api.4a4.ai";
+
+function getJwt() {
+  return process.env.FOUR_A_JWT ?? process.env.FOA_JWT ?? "";
+}
+function getGateway() {
+  return (process.env.FOUR_A_GATEWAY ?? DEFAULT_GATEWAY).replace(/\/$/, "");
+}
+
+function die(code, message) {
+  process.stderr.write(message.endsWith("\n") ? message : `${message}\n`);
+  process.exit(code);
+}
+
+const HELP_ROOT = `4a — Agent-Agnostic Accessible Archive CLI
+
+Usage: 4a <subcommand> [options]
+
+Subcommands:
+  score    Publish a kind:30506 score and its paired kind:30507 rationale
+  comment  Publish a standalone kind:30507 comment
+
+Auth:
+  Set FOUR_A_JWT to a 4A bearer JWT before running. Obtain one via
+  https://api.4a4.ai/auth/github/start (or /auth/google/start).
+
+Environment:
+  FOUR_A_JWT       Bearer JWT for the hosted gateway (required).
+  FOUR_A_GATEWAY   Gateway base URL (default: ${DEFAULT_GATEWAY}).
+
+Run "4a <subcommand> --help" for subcommand-specific options.
+`;
+
+const HELP_SCORE = `4a score — publish a paired score + rationale
+
+Usage:
+  4a score <event_id> --value <0..1> --rationale "<text>" [options]
+
+Arguments:
+  <event_id>           64-char hex id of the target event being scored
+
+Required options:
+  --value <number>     Score in [0, 1]
+  --rationale <text>   Justifying text (published as a paired kind:30507)
+
+Optional options:
+  --tier <string>      Tier label (per-aggregator vocabulary)
+  --intent <string>    Intent label for the rationale comment (default: justify)
+  --a-tag <addr>       Addressable a-tag of the target (kind:pubkey:d)
+
+Prints both event ids and nostr: URIs on success.
+`;
+
+const HELP_COMMENT = `4a comment — publish a standalone comment
+
+Usage:
+  4a comment <event_id> --body "<text>" [options]
+
+Arguments:
+  <event_id>           64-char hex id of the target event being commented on
+
+Required options:
+  --body <text>        Comment body (non-empty)
+
+Optional options:
+  --intent <string>    Intent label (e.g. justify, challenge, context)
+  --reply-to <id>      64-char hex parent comment id (threaded reply)
+  --a-tag <addr>       Addressable a-tag of the target (kind:pubkey:d)
+
+Prints the event id and nostr: URI on success.
+`;
+
+const HEX64 = /^[0-9a-f]{64}$/i;
+
+async function postJson(path, body) {
+  const jwt = getJwt();
+  if (!jwt) {
+    die(
+      2,
+      "missing FOUR_A_JWT — obtain a JWT via https://api.4a4.ai/auth/github/start and export it",
+    );
+  }
+  const url = `${getGateway()}${path}`;
+  let res;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${jwt}`,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    die(1, `network error contacting ${url}: ${err.message}`);
+  }
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    /* fall through with null */
+  }
+  if (!res.ok) {
+    const msg = data?.message || data?.error || `HTTP ${res.status}`;
+    die(1, `gateway error (${res.status}): ${msg}`);
+  }
+  return data;
+}
+
+function nostrUri(eventId) {
+  return `nostr:${eventId}`;
+}
+
+function requireEventIdArg(positionals, subcommand) {
+  if (positionals.length === 0) {
+    die(2, `4a ${subcommand}: missing <event_id> argument (run "4a ${subcommand} --help")`);
+  }
+  if (positionals.length > 1) {
+    die(2, `4a ${subcommand}: unexpected extra arguments: ${positionals.slice(1).join(" ")}`);
+  }
+  const id = positionals[0];
+  if (!HEX64.test(id)) {
+    die(2, `4a ${subcommand}: <event_id> must be a 64-char hex string`);
+  }
+  return id.toLowerCase();
+}
+
+async function cmdScore(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      help: { type: "boolean", short: "h" },
+      value: { type: "string" },
+      rationale: { type: "string" },
+      tier: { type: "string" },
+      intent: { type: "string" },
+      "a-tag": { type: "string" },
+    },
+  });
+  if (values.help) {
+    process.stdout.write(HELP_SCORE);
+    return;
+  }
+  const eventId = requireEventIdArg(positionals, "score");
+  if (values.value === undefined) die(2, "4a score: --value is required");
+  const value = Number(values.value);
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    die(2, "4a score: --value must be a finite number in [0, 1]");
+  }
+  if (!values.rationale || values.rationale.trim().length === 0) {
+    die(2, "4a score: --rationale is required and must be non-empty");
+  }
+
+  const body = {
+    target_event_id: eventId,
+    value,
+    rationale: values.rationale,
+  };
+  if (values.tier !== undefined) body.tier = values.tier;
+  if (values.intent !== undefined) body.intent = values.intent;
+  if (values["a-tag"] !== undefined) body.target_a_tag = values["a-tag"];
+
+  const data = await postJson("/v0/score", body);
+  process.stdout.write(
+    [
+      `score_event_id   ${data.score_event_id}`,
+      `score_uri        ${nostrUri(data.score_event_id)}`,
+      `comment_event_id ${data.comment_event_id}`,
+      `comment_uri      ${nostrUri(data.comment_event_id)}`,
+      `score_address    ${data.score_address}`,
+      `comment_address  ${data.comment_address}`,
+      `pubkey           ${data.pubkey}`,
+      `npub             ${data.npub}`,
+      "",
+    ].join("\n"),
+  );
+}
+
+async function cmdComment(argv) {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      help: { type: "boolean", short: "h" },
+      body: { type: "string" },
+      intent: { type: "string" },
+      "reply-to": { type: "string" },
+      "a-tag": { type: "string" },
+    },
+  });
+  if (values.help) {
+    process.stdout.write(HELP_COMMENT);
+    return;
+  }
+  const eventId = requireEventIdArg(positionals, "comment");
+  if (!values.body || values.body.trim().length === 0) {
+    die(2, "4a comment: --body is required and must be non-empty");
+  }
+  const replyTo = values["reply-to"];
+  if (replyTo !== undefined && !HEX64.test(replyTo)) {
+    die(2, "4a comment: --reply-to must be a 64-char hex event id");
+  }
+
+  const requestBody = {
+    target_event_id: eventId,
+    body: values.body,
+  };
+  if (values.intent !== undefined) requestBody.intent = values.intent;
+  if (replyTo !== undefined) requestBody.reply_to_event_id = replyTo.toLowerCase();
+  if (values["a-tag"] !== undefined) requestBody.target_a_tag = values["a-tag"];
+
+  const data = await postJson("/v0/comment", requestBody);
+  process.stdout.write(
+    [
+      `comment_event_id ${data.comment_event_id}`,
+      `comment_uri      ${nostrUri(data.comment_event_id)}`,
+      `address          ${data.address}`,
+      `pubkey           ${data.pubkey}`,
+      `npub             ${data.npub}`,
+      "",
+    ].join("\n"),
+  );
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  if (argv.length === 0 || argv[0] === "-h" || argv[0] === "--help" || argv[0] === "help") {
+    process.stdout.write(HELP_ROOT);
+    return;
+  }
+  const subcommand = argv[0];
+  const rest = argv.slice(1);
+  switch (subcommand) {
+    case "score":
+      await cmdScore(rest);
+      return;
+    case "comment":
+      await cmdComment(rest);
+      return;
+    default:
+      die(2, `4a: unknown subcommand "${subcommand}" (run "4a --help")`);
+  }
+}
+
+main().catch((err) => {
+  die(1, `4a: ${err?.stack ?? err?.message ?? String(err)}`);
+});

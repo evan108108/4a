@@ -19,8 +19,20 @@ import { verifyJwt, type AuthClaims } from "./auth";
 import { handleCredibility, normalizePubkey } from "./credibility";
 import { runPublish, type Kind as PublishKind, type PublishEnv } from "./publish";
 import type { NostrEvent, QueryFilter, RelayPool } from "./relay-pool";
+import {
+  runScore,
+  validateScoreBody,
+  ScoreValidationError,
+  type ScoreEnv,
+} from "./score";
+import {
+  runComment,
+  validateCommentBody,
+  CommentValidationError,
+  type CommentEnv,
+} from "./comment";
 
-interface McpEnv extends PublishEnv {
+interface McpEnv extends PublishEnv, ScoreEnv, CommentEnv {
   RELAY_POOL: DurableObjectNamespace<RelayPool>;
   MCP_HUB: DurableObjectNamespace<McpHub>;
 }
@@ -316,6 +328,90 @@ const TOOLS: ToolDef[] = [
     ],
   },
   {
+    name: "score",
+    description:
+      "Publish a 4A Score (kind:30506) and its paired rationale Comment (kind:30507) atomically — mirrors POST /v0/score. The score expresses a numeric judgment in [0,1] about a target event; the rationale comment justifies it per SPEC §Credibility events. Both events are signed by your custodial Nostr key. Requires an authenticated session — see auth_4a.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        target_event_id: {
+          type: "string",
+          description: "64-char hex event id of the target being scored",
+        },
+        value: {
+          type: "number",
+          minimum: 0,
+          maximum: 1,
+          description: "Numeric score in [0, 1]",
+        },
+        rationale: {
+          type: "string",
+          description: "Justifying text published as a paired kind:30507 Comment",
+        },
+        tier: { type: "string", description: "Optional tier label (per-aggregator vocabulary)" },
+        intent: {
+          type: "string",
+          description: "Optional intent for the rationale comment (default: 'justify')",
+        },
+        target_a_tag: {
+          type: "string",
+          description: "Optional addressable a-tag of the target (kind:pubkey:d)",
+        },
+      },
+      required: ["target_event_id", "value", "rationale"],
+      additionalProperties: false,
+    },
+    examples: [
+      {
+        name: "score",
+        arguments: {
+          target_event_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          value: 0.85,
+          rationale: "Citations are well-sourced and the claim is internally consistent.",
+        },
+      },
+    ],
+  },
+  {
+    name: "comment",
+    description:
+      "Publish a 4A Comment (kind:30507) on a target event — mirrors POST /v0/comment. Use to comment on claims, scores, or other comments without producing a paired score. Set reply_to_event_id to thread under a parent comment (NIP-10 markers applied). Requires an authenticated session — see auth_4a.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        target_event_id: {
+          type: "string",
+          description: "64-char hex event id of the target being commented on",
+        },
+        body: { type: "string", description: "Comment body (non-empty)" },
+        intent: {
+          type: "string",
+          description: "Optional intent label (e.g. 'justify', 'challenge', 'context')",
+        },
+        reply_to_event_id: {
+          type: "string",
+          description: "Optional 64-char hex parent comment id when threading a reply",
+        },
+        target_a_tag: {
+          type: "string",
+          description: "Optional addressable a-tag of the target (kind:pubkey:d)",
+        },
+      },
+      required: ["target_event_id", "body"],
+      additionalProperties: false,
+    },
+    examples: [
+      {
+        name: "comment",
+        arguments: {
+          target_event_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          body: "This claim conflicts with the cited source — see paragraph 3.",
+          intent: "challenge",
+        },
+      },
+    ],
+  },
+  {
     name: "attest",
     description:
       "Publish a NIP-32 label (kind 1985) attesting to a 4A subject under a namespaced predicate. Use for credibility assertions, stamps, or sponsor declarations. 'subject' is a 64-char hex pubkey or event id; 'namespace' must match 4a.credibility.<domain> | 4a.stamp.<source> | 4a.sponsor; 'value' is optional and namespace-scoped. Requires an authenticated session — see auth_4a.",
@@ -380,6 +476,10 @@ async function callTool(
       return runPublishTool("relation", args, env, session);
     case "attest":
       return runPublishTool("attest", args, env, session);
+    case "score":
+      return runScoreTool(args, env, session);
+    case "comment":
+      return runCommentTool(args, env, session);
     default:
       throw rpcError(METHOD_NOT_FOUND, `unknown tool: ${name}`);
   }
@@ -434,6 +534,79 @@ async function runPublishTool(
     pubkey: result.pubkey,
     npub: result.npub,
     relayResults: result.relayResults,
+  };
+}
+
+async function runScoreTool(
+  args: Record<string, unknown>,
+  env: McpEnv,
+  session: Session,
+): Promise<unknown> {
+  if (!session.claims) {
+    throw rpcError(
+      INVALID_REQUEST,
+      "not authenticated — pass `Authorization: Bearer <jwt>` on the GET /sse handshake or call the `auth_4a` tool",
+    );
+  }
+  let body;
+  try {
+    body = validateScoreBody(args);
+  } catch (err) {
+    if (err instanceof ScoreValidationError) {
+      throw rpcError(INVALID_PARAMS, err.message);
+    }
+    throw err;
+  }
+  const result = await runScore(body, session.claims, env);
+  if (!("ok" in result) || !result.ok) {
+    const code = result.status === 400 ? INVALID_PARAMS : INTERNAL_ERROR;
+    throw rpcError(code, result.message, { error: result.error, ...(result.extra ?? {}) });
+  }
+  return {
+    ok: true,
+    score_event_id: result.score_event_id,
+    comment_event_id: result.comment_event_id,
+    score_address: result.score_address,
+    comment_address: result.comment_address,
+    pubkey: result.pubkey,
+    npub: result.npub,
+    relay_acks: result.relay_acks,
+  };
+}
+
+async function runCommentTool(
+  args: Record<string, unknown>,
+  env: McpEnv,
+  session: Session,
+): Promise<unknown> {
+  if (!session.claims) {
+    throw rpcError(
+      INVALID_REQUEST,
+      "not authenticated — pass `Authorization: Bearer <jwt>` on the GET /sse handshake or call the `auth_4a` tool",
+    );
+  }
+  let body;
+  try {
+    body = validateCommentBody(args);
+  } catch (err) {
+    if (err instanceof CommentValidationError) {
+      throw rpcError(INVALID_PARAMS, err.message);
+    }
+    throw err;
+  }
+  const result = await runComment(body, session.claims, env);
+  if (!("ok" in result) || !result.ok) {
+    const code = result.status === 400 ? INVALID_PARAMS : INTERNAL_ERROR;
+    throw rpcError(code, result.message, { error: result.error, ...(result.extra ?? {}) });
+  }
+  return {
+    ok: true,
+    comment_event_id: result.comment_event_id,
+    address: result.address,
+    kind: result.kind,
+    pubkey: result.pubkey,
+    npub: result.npub,
+    relay_acks: result.relay_acks,
   };
 }
 

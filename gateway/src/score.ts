@@ -51,7 +51,7 @@ const JSON_HEADERS: Record<string, string> = {
   "Cache-Control": "no-store",
 };
 
-class ValidationError extends Error {}
+export class ScoreValidationError extends Error {}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
@@ -70,7 +70,7 @@ function nowSec(): number {
   return Math.floor(Date.now() / 1000);
 }
 
-interface ScoreBody {
+export interface ScoreBody {
   target_event_id: string;
   value: number;
   rationale: string;
@@ -79,29 +79,29 @@ interface ScoreBody {
   target_a_tag?: string;
 }
 
-function validateBody(raw: Record<string, unknown>): ScoreBody {
+export function validateScoreBody(raw: Record<string, unknown>): ScoreBody {
   const targetId = raw.target_event_id;
   if (typeof targetId !== "string" || !HEX64.test(targetId)) {
-    throw new ValidationError("target_event_id must be a 64-char hex string");
+    throw new ScoreValidationError("target_event_id must be a 64-char hex string");
   }
 
   const value = raw.value;
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
-    throw new ValidationError("value must be a finite number in [0, 1]");
+    throw new ScoreValidationError("value must be a finite number in [0, 1]");
   }
 
   const rationale = raw.rationale;
   if (typeof rationale !== "string" || rationale.trim().length === 0) {
-    throw new ValidationError("rationale must be a non-empty string");
+    throw new ScoreValidationError("rationale must be a non-empty string");
   }
   if (new TextEncoder().encode(rationale).byteLength > MAX_RATIONALE_BYTES) {
-    throw new ValidationError(`rationale exceeds ${MAX_RATIONALE_BYTES} bytes`);
+    throw new ScoreValidationError(`rationale exceeds ${MAX_RATIONALE_BYTES} bytes`);
   }
 
   let tier: string | undefined;
   if (raw.tier !== undefined) {
     if (typeof raw.tier !== "string" || raw.tier.length === 0) {
-      throw new ValidationError("tier must be a non-empty string when present");
+      throw new ScoreValidationError("tier must be a non-empty string when present");
     }
     tier = raw.tier;
   }
@@ -109,7 +109,7 @@ function validateBody(raw: Record<string, unknown>): ScoreBody {
   let intent: string | undefined;
   if (raw.intent !== undefined) {
     if (typeof raw.intent !== "string" || raw.intent.length === 0) {
-      throw new ValidationError("intent must be a non-empty string when present");
+      throw new ScoreValidationError("intent must be a non-empty string when present");
     }
     intent = raw.intent;
   }
@@ -117,7 +117,7 @@ function validateBody(raw: Record<string, unknown>): ScoreBody {
   let target_a_tag: string | undefined;
   if (raw.target_a_tag !== undefined) {
     if (typeof raw.target_a_tag !== "string" || !ADDRESS_PATTERN.test(raw.target_a_tag)) {
-      throw new ValidationError("target_a_tag must match kind:pubkey:d");
+      throw new ScoreValidationError("target_a_tag must match kind:pubkey:d");
     }
     target_a_tag = raw.target_a_tag;
   }
@@ -208,7 +208,7 @@ async function publishSigned(
   return results;
 }
 
-interface PairedPublishSuccess {
+export interface PairedPublishSuccess {
   ok: true;
   score_event_id: string;
   comment_event_id: string;
@@ -219,11 +219,19 @@ interface PairedPublishSuccess {
   relay_acks: { score: RelayResult[]; comment: RelayResult[] };
 }
 
-async function runScore(
+export interface PairedPublishFailure {
+  ok?: undefined;
+  error: string;
+  message: string;
+  status: number;
+  extra?: Record<string, unknown>;
+}
+
+export async function runScore(
   body: ScoreBody,
   claims: AuthClaims,
   env: ScoreEnv,
-): Promise<PairedPublishSuccess | { error: string; message: string; status: number; extra?: Record<string, unknown> }> {
+): Promise<PairedPublishSuccess | PairedPublishFailure> {
   const rateKey = `${claims.provider}:${claims.oauth_id}`;
   const rl = rateLimitCheck(rateKey);
   if (!rl.ok) {
@@ -322,9 +330,9 @@ export async function handleScoreRequest(
 
   let body: ScoreBody;
   try {
-    body = validateBody(raw as Record<string, unknown>);
+    body = validateScoreBody(raw as Record<string, unknown>);
   } catch (err) {
-    if (err instanceof ValidationError) {
+    if (err instanceof ScoreValidationError) {
       return jsonError("bad_request", err.message, 400);
     }
     return jsonError(
