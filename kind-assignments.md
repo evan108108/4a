@@ -14,6 +14,8 @@
 | **30502** | `fa:Entity` | A thing — person, organization, place, codebase, concept | Addressable by `d` |
 | **30503** | `fa:Relation` | A reified relationship between two entities | Addressable by `d` |
 | **30504** | `fa:Commons` | A pubkey declaring itself the commons for a topic or project | Addressable by `d` (topic slug) |
+| **30506** | `fa:Score` | A signed, weighted opinion about a target 4A object | Addressable by `d` (target event id) |
+| **30507** | `fa:Comment` | A signed prose response targeting any 4A event | Addressable by `d` (per-comment slug) |
 
 These numbers are **placeholders** chosen from an apparently unreserved block in the 30000 range. Before v0 ships the spec should either (a) submit a NIP reserving the block or (b) pick the first five contiguous unassigned slots in 30000–39999 after a fresh registry check against [nostr-protocol/nips](https://github.com/nostr-protocol/nips).
 
@@ -23,7 +25,7 @@ Known constraints that narrowed the choice:
 - 30078 is "application-specific data" — overloaded but in use.
 - 39000–39009 is NIP-29 group metadata. Do not use this range despite superficial cuteness.
 
-The 30500–30509 block reads unassigned at the time of writing. Reserve 30500–30519 to leave room for post-v0 kinds (pin declarations, aggregator rollups, response/reply objects) without fragmentation.
+The 30500–30509 block reads unassigned at the time of writing. Reserve 30500–30519 to leave room for post-v0 kinds (pin declarations, aggregator rollups, response/reply objects) without fragmentation. Kinds **30506** (`fa:Score`) and **30507** (`fa:Comment`) are now defined; see [`SPEC.md` § Credibility events](./SPEC.md#credibility-events) for normative shape, paired-rationale rules, and supersession behavior.
 
 ## Required tags
 
@@ -159,6 +161,48 @@ A pubkey declaring itself a commons for a topic or project. Consumers subscribe 
 
 The `p` tags list co-maintainers whose pubkeys are recognized as publishing to this commons.
 
+### 30506 — `fa:Score`
+
+A signed, weighted opinion about a target 4A object. The full normative shape, paired-rationale `MUST`, value-range `MUST`, content-addressing `MUST`, and aggregator obligations are in [`SPEC.md` § Credibility events → Score event (kind:30506)](./SPEC.md#score-event-kind30506).
+
+```json
+{
+  "kind": 30506,
+  "tags": [
+    ["d", "9f8e7d6c5b4a39281706f5e4d3c2b1a0908070605040302010f0e0d0c0b0a090"],
+    ["e", "9f8e7d6c5b4a39281706f5e4d3c2b1a0908070605040302010f0e0d0c0b0a090"],
+    ["a", "30501:<author-pubkey>:next-jit-claim-1"],
+    ["blake3", "bk-..."],
+    ["alt", "score 0.82 of next-jit-claim-1"],
+    ["fa:context", "https://4a4.ai/ns/v0"]
+  ],
+  "content": "{\"@context\":\"https://4a4.ai/ns/v0\",\"@type\":\"Score\",\"value\":0.82,\"tier\":\"verified\",\"target\":{\"@id\":\"nostr:9f8e7d6c…\"}}"
+}
+```
+
+`d` is the target event id, so `(scorer-pubkey, 30506, target-event-id)` is unique per scorer per target. Latest write wins.
+
+### 30507 — `fa:Comment`
+
+A signed prose response targeting any 4A event, including claims, scores, attestations, and other comments. The full normative shape and recursive-commenting rules are in [`SPEC.md` § Credibility events → Comment event (kind:30507)](./SPEC.md#comment-event-kind30507).
+
+```json
+{
+  "kind": 30507,
+  "tags": [
+    ["d", "justify-score-9f8e7d6c-1"],
+    ["e", "<target-score-event-id>"],
+    ["a", "30506:<scorer-pubkey>:9f8e7d6c…"],
+    ["blake3", "bk-..."],
+    ["alt", "rationale for score 0.82 of claim 9f8e7d6c…"],
+    ["fa:context", "https://4a4.ai/ns/v0"]
+  ],
+  "content": "{\"@context\":\"https://4a4.ai/ns/v0\",\"@type\":\"Comment\",\"intent\":\"justify\",\"body\":\"...\",\"target\":{\"@id\":\"nostr:<target-event-id>\"}}"
+}
+```
+
+A comment paired with a score MUST be authored by the same pubkey, MUST `e`-tag the score's event id, and MUST land within a 24-hour window of the score; aggregators MUST treat unjustified scores as weight-zero.
+
 ## Consumption
 
 An MCP gateway subscribes to a chosen set of relays with filters like:
@@ -180,7 +224,7 @@ Clients that don't recognize 4A kinds fall back to the `alt` tag for a human-rea
 
 Leave these slots unclaimed pending experience:
 
-- 30505–30509 — pin declarations, aggregator rollups, responses, disputes. Design after v0 adoption data.
+- 30505 and 30508–30509 — pin declarations, aggregator rollups, response/reply objects, disputes. Design after v0 adoption data. (Kinds 30506 and 30507 are now defined for `Score` and `Comment` respectively.)
 - 30510–30514 — encrypted variants of 30500–30504 (private mode). Reserved 1:1 with the public kinds (30510 = encrypted Observation, 30511 = encrypted Claim, etc.). See [`SPEC.md`](./SPEC.md) → "Future work — private mode" for the anticipated design. Implementations MUST NOT publish in this range until the encrypted-variant specification is finalized.
 - 30515–30519 — further post-v0 kinds.
 
@@ -194,3 +238,4 @@ Leave these slots unclaimed pending experience:
 ## Change log
 
 - 2026-04-24 — initial draft. Kinds assigned tentatively; subject to NIP review.
+- 2026-04-28 — Added kind 30506 (`fa:Score`) and kind 30507 (`fa:Comment`) for Phase 3 credibility events. Normative shape lives in [`SPEC.md` § Credibility events](./SPEC.md#credibility-events).
