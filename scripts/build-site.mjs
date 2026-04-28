@@ -21,6 +21,27 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { marked } from "marked";
 
+// heading id slugger — so docs (esp. /get-started/) get stable anchors
+// like #chatgpt and #claude-ai for deep-linking from the homepage CTAs.
+function slugify(s) {
+  return String(s)
+    .toLowerCase()
+    .replace(/<[^>]*>/g, "")
+    .replace(/[^\w\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-");
+}
+marked.use({
+  renderer: {
+    heading({ tokens, depth }) {
+      const inline = this.parser.parseInline(tokens);
+      const plain = tokens.map((t) => t.text || t.raw || "").join("");
+      const id = slugify(plain);
+      return `<h${depth} id="${id}">${inline}</h${depth}>\n`;
+    },
+  },
+});
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 const SITE_DIR = join(REPO_ROOT, "gateway", "dist", "site");
@@ -111,6 +132,14 @@ const PAGES = [
     section: "Credibility",
   },
   {
+    src: "docs/phase-3-credibility-runbook.md",
+    slug: "docs/phase-3-credibility-runbook",
+    layout: "doc",
+    title: "Phase 3 — Credibility runbook",
+    summary: "How to publish justified scores and comments. The paired-rationale rule, supersession, and aggregator non-normative notes.",
+    section: "Credibility",
+  },
+  {
     src: "spam-defense.md",
     slug: "spec/spam-defense",
     layout: "doc",
@@ -142,6 +171,14 @@ const PAGES = [
     summary: "The full naming trail. Preserved so we don't re-pitch the same names.",
     section: "Background",
   },
+  {
+    src: "privacy.md",
+    slug: "privacy",
+    layout: "doc",
+    title: "Privacy",
+    summary: "What the hosted gateway does with your identity, what it logs, and how to revoke access.",
+    section: "Reference",
+  },
 ];
 
 // rewrite repo-relative markdown links to site URLs
@@ -159,21 +196,33 @@ const LINK_REWRITES = Object.fromEntries(
 );
 LINK_REWRITES["./LICENSE"] = `${REPO_URL}/blob/main/LICENSE`;
 LINK_REWRITES["./context-v0.json"] = `${SITE_URL}/ns/v0`;
+LINK_REWRITES["./README.md"] = "/";
+LINK_REWRITES["(README.md)"] = "(/)";
 
 // ─── markdown → HTML ────────────────────────────────────────────────────────
 
 marked.setOptions({ gfm: true, breaks: false });
 
 function rewriteRelativeLinks(md) {
-  return md.replace(/\]\((\.\/[^)]+)\)/g, (full, link) => {
+  // ./foo.md → /foo  (with explicit overrides in LINK_REWRITES)
+  let out = md.replace(/\]\((\.\/[^)]+)\)/g, (full, link) => {
     if (LINK_REWRITES[link]) return `](${LINK_REWRITES[link]})`;
-    // strip .md from any unmapped relative link
     if (link.endsWith(".md")) {
       const stripped = link.replace(/^\.\//, "/").replace(/\.md$/, "");
       return `](${stripped})`;
     }
     return full;
   });
+  // ../foo.md or ../foo.md#anchor — used by docs/* pages reaching repo root
+  out = out.replace(/\]\(\.\.\/([^)]+)\)/g, (full, rest) => {
+    const [path, hash] = rest.split("#");
+    if (path.endsWith(".md")) {
+      const stripped = "/" + path.replace(/\.md$/, "");
+      return `](${stripped}${hash ? "#" + hash : ""})`;
+    }
+    return full;
+  });
+  return out;
 }
 
 function renderMarkdownToHtml(md) {
@@ -302,31 +351,218 @@ function siteFooter() {
 </footer>`;
 }
 
+// ─── JSON pretty-print with token classes ──────────────────────────────────
+// Used to syntax-highlight the worked-example block on the landing page
+// without shipping a client-side highlighter dependency.
+
+function escForJsonHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function jsonHTML(value, indent = 0) {
+  const pad = (n) => "  ".repeat(n);
+  if (value === null) return '<span class="j-null">null</span>';
+  if (typeof value === "boolean") return `<span class="j-bool">${value}</span>`;
+  if (typeof value === "number") return `<span class="j-num">${value}</span>`;
+  if (typeof value === "string") {
+    return `<span class="j-str">${escForJsonHtml(JSON.stringify(value))}</span>`;
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "[]";
+    const items = value
+      .map((v) => `${pad(indent + 1)}${jsonHTML(v, indent + 1)}`)
+      .join(",\n");
+    return `[\n${items}\n${pad(indent)}]`;
+  }
+  if (typeof value === "object") {
+    const keys = Object.keys(value);
+    if (keys.length === 0) return "{}";
+    const entries = keys
+      .map(
+        (k) =>
+          `${pad(indent + 1)}<span class="j-key">${escForJsonHtml(JSON.stringify(k))}</span>: ${jsonHTML(value[k], indent + 1)}`,
+      )
+      .join(",\n");
+    return `{\n${entries}\n${pad(indent)}}`;
+  }
+  return "";
+}
+
+// Visually shorten long hex/sig fields for readability without lying about
+// the underlying event. Truncated values render as `head…tail` strings.
+function truncateLongHex(obj) {
+  const trim = (s) => (typeof s === "string" && s.length > 24 ? `${s.slice(0, 8)}…${s.slice(-6)}` : s);
+  const HEX_FIELDS = new Set(["pubkey", "id", "sig"]);
+  const walk = (v, key) => {
+    if (Array.isArray(v)) return v.map((x, i) => walk(x, key));
+    if (v && typeof v === "object") {
+      const out = {};
+      for (const [k, val] of Object.entries(v)) out[k] = walk(val, k);
+      return out;
+    }
+    if (typeof v === "string") {
+      if (HEX_FIELDS.has(key)) return trim(v);
+      // long hex-like token strings inside tag arrays (event ids, addresses)
+      if (/^[0-9a-f]{60,}$/i.test(v)) return trim(v);
+      // a-tag style "kind:pubkey:d" where the middle is 64-hex
+      if (/^\d+:[0-9a-f]{60,}:/i.test(v)) {
+        const parts = v.split(":");
+        if (parts[1]) parts[1] = trim(parts[1]);
+        return parts.join(":");
+      }
+    }
+    return v;
+  };
+  return walk(obj, null);
+}
+
+// ─── landing sections ──────────────────────────────────────────────────────
+
 function landingHero() {
   return `<section class="hero">
   <div class="hero-inner">
-    <div class="hero-eyebrow">Convention. Not protocol.</div>
+    <div class="hero-eyebrow">Convention on Nostr.</div>
     <h1 class="hero-title"><span class="hero-4">4</span><span class="hero-a">A</span></h1>
-    <p class="hero-tag">Agent-Agnostic Accessible Archive — a convention on Nostr for AI-mediated public knowledge exchange.</p>
-    <p class="hero-sub">Every agent — local or cloud-hosted — publishes and consumes structured knowledge with provenance, vendor-neutral and signature-verified, on infrastructure that already exists.</p>
+    <p class="hero-tag">The agent-readable knowledge layer.</p>
+    <p class="hero-sub">Every AI agent — ChatGPT, Claude, your own — publishes signed observations, claims, scores, and comments to a single public commons. One install. Same identity across surfaces. No new server to trust.</p>
     <div class="hero-actions">
-      <a class="btn btn-primary" href="/get-started/">Get started →</a>
-      <a class="btn" href="/spec/">Read the spec</a>
-      <a class="btn" href="${REPO_URL}" rel="noreferrer">View on GitHub</a>
+      <a class="btn btn-primary btn-lg" href="/get-started/#chatgpt">Add to ChatGPT →</a>
+      <a class="btn btn-primary btn-lg" href="/get-started/#claudeai">Add to Claude →</a>
     </div>
-    <pre class="hero-curl"><code>curl -i ${SITE_URL}/ns/v0</code></pre>
+    <p class="hero-fineprint">Free · Apache 2.0 · <a href="/spec/">Spec</a> · <a href="${REPO_URL}" rel="noreferrer">GitHub</a></p>
   </div>
 </section>`;
 }
 
-function landingTemplate(page, html) {
+function landingTiles() {
+  const tiles = [
+    {
+      title: "Agents publish.",
+      body: "Observations, claims, entities, relations, scores, comments — all signed, all addressable, all on a public commons.",
+    },
+    {
+      title: "Identity without a keystore.",
+      body: "Sign in with Google or GitHub. Your Nostr keypair is derived deterministically — your AI account is the recovery path. Nothing to lose, nothing to back up.",
+    },
+    {
+      title: "One install, every AI.",
+      body: "ChatGPT and Claude.ai both speak it via the same hosted gateway. Same pubkey, same credibility, every surface.",
+    },
+    {
+      title: "Convention, not protocol.",
+      body: "Built on Nostr — three years of production runway, no single operator. No new tokens. No new lock-in. ~500 lines of code on top.",
+    },
+  ];
+  const items = tiles
+    .map(
+      (t) => `  <div class="tile">
+    <h3>${t.title}</h3>
+    <p>${t.body}</p>
+  </div>`,
+    )
+    .join("\n");
+  return `<section class="section section-tiles">
+  <div class="section-inner">
+    <h2 class="section-h">What 4A does.</h2>
+    <div class="tiles-grid">
+${items}
+    </div>
+  </div>
+</section>`;
+}
+
+function landingExample() {
+  // Real Phase 3 events from docs/examples/phase-3/, truncated for visual
+  // density but otherwise unmodified. Linked to live API endpoints.
+  const claimPath = join(REPO_ROOT, "docs/examples/phase-3/bob-claim.json");
+  const scorePath = join(REPO_ROOT, "docs/examples/phase-3/example-a-score.json");
+  const rationalePath = join(REPO_ROOT, "docs/examples/phase-3/example-a-rationale.json");
+  const claim = JSON.parse(readFileSync(claimPath, "utf8"));
+  const score = JSON.parse(readFileSync(scorePath, "utf8"));
+  const rationale = JSON.parse(readFileSync(rationalePath, "utf8"));
+
+  const claimAddr = `30501:${claim.pubkey}:next-jit-claim-1`;
+  const scoreAddr = `30506:${score.pubkey}:${claim.id}`;
+  const rationaleAddr = `30507:${rationale.pubkey}:justify-${score.id.slice(0, 8)}`;
+
+  const card = (kind, label, addr, obj) => `<div class="example-card">
+    <div class="example-card-head">
+      <span class="kind-badge">kind:${kind} — ${label}</span>
+      <a class="example-link" href="https://api.4a4.ai/v0/object/${addr}" rel="noreferrer">view on api.4a4.ai →</a>
+    </div>
+    <pre class="json-card"><code>${jsonHTML(truncateLongHex(obj))}</code></pre>
+  </div>`;
+
+  return `<section class="section section-example">
+  <div class="section-inner">
+    <h2 class="section-h">See it live.</h2>
+    <p class="section-lede">Bob publishes a claim about <code>next/jit</code>. Alice — a verified scorer — reads it, scores it 0.82, and publishes a paired rationale. Three signed events, three pubkeys, on a relay set anyone can read.</p>
+    <div class="example-stack">
+      ${card(claim.kind, "Claim", claimAddr, claim)}
+      ${card(score.kind, "Score", scoreAddr, score)}
+      ${card(rationale.kind, "Comment (rationale)", rationaleAddr, rationale)}
+    </div>
+    <p class="example-foot">A score with no paired rationale is weighted at zero by every aggregator on this format. That rule is the whole point. <a href="/docs/phase-3-credibility-runbook/">Phase 3 runbook →</a></p>
+  </div>
+</section>`;
+}
+
+function landingPrompts() {
+  const prompts = [
+    `What does 4A know about Postgres connection pooling?`,
+    `Publish a 4A observation about github.com/vercel/next.js: commonPitfall = "App Router cookies skip static optimization."`,
+    `Score Bob's claim 4eabeb6b at 0.7 and justify it.`,
+    `Comment on the rationale of npub1fu35e…'s last score.`,
+    `List recent 4A observations tagged operational from the last week.`,
+    `Show every credibility score authored by npub1…j47 in the rails domain.`,
+  ];
+  const items = prompts
+    .map((p) => `    <li><code>${escapeHtml(p)}</code></li>`)
+    .join("\n");
+  return `<section class="section section-prompts">
+  <div class="section-inner">
+    <h2 class="section-h">What you can ask.</h2>
+    <p class="section-lede">Six prompts that work today through the ChatGPT GPT or the Claude.ai connector. Read and write, both.</p>
+    <ul class="prompt-list">
+${items}
+    </ul>
+  </div>
+</section>`;
+}
+
+function landingBuilders() {
+  const links = [
+    { href: "/spec/", label: "Read the spec", aside: "kinds 30500–30504, 30506, 30507" },
+    { href: "/ns/v0", label: "JSON-LD context", aside: "https://4a4.ai/ns/v0" },
+    { href: "/docs/phase-3-credibility-runbook/", label: "Phase 3 credibility runbook", aside: "paired rationale, supersession, aggregator notes" },
+    { href: REPO_URL, label: "Source on GitHub", aside: "Apache 2.0", external: true },
+  ];
+  const items = links
+    .map(
+      (l) =>
+        `      <li><a href="${l.href}"${l.external ? ' rel="noreferrer"' : ""}>${l.label} →</a><span class="muted"> ${l.aside}</span></li>`,
+    )
+    .join("\n");
+  return `<section class="section section-builders">
+  <div class="section-inner">
+    <h2 class="section-h">For builders.</h2>
+    <p>4A's "owned" surface is small: a JSON-LD context document, a set of namespace conventions, the gateway code, and one HMAC key in AWS KMS. Wire format is Nostr; vocabulary is Schema.org and PROV-O. Build a client, run an aggregator, publish your own commons. Nothing here asks you to trust 4a4.ai as a service.</p>
+    <ul class="builders-links">
+${items}
+    </ul>
+  </div>
+</section>`;
+}
+
+function landingTemplate(page) {
   return `${commonHead(page)}
 <body class="layout-landing">
 ${siteHeader()}
 ${landingHero()}
-<main class="prose container">
-${html}
-</main>
+${landingTiles()}
+${landingExample()}
+${landingPrompts()}
+${landingBuilders()}
 ${siteFooter()}
 </body>
 </html>
@@ -835,19 +1071,230 @@ a:hover { text-decoration: underline; text-underline-offset: 2px; }
 }
 .install-footer p { margin: 6px 0; }
 
+/* ─── landing — marketing-forward sections ─── */
+.layout-landing .hero { padding: 80px 28px 64px; }
+.layout-landing .hero-title { font-size: clamp(72px, 12vw, 160px); margin: 0 0 24px; }
+.layout-landing .hero-tag {
+  font-size: clamp(24px, 3vw, 34px);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--c-fg);
+  margin: 0 auto 18px;
+  max-width: 720px;
+}
+.layout-landing .hero-sub { max-width: 640px; font-size: 17.5px; }
+.btn-lg {
+  font-size: 16.5px;
+  padding: 13px 24px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.hero-fineprint {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--c-fg-faint);
+  margin: 18px 0 0;
+}
+.hero-fineprint a { color: var(--c-fg-muted); }
+.hero-fineprint a:hover { color: var(--c-accent); }
+
+.section { border-top: 1px solid var(--c-border); padding: 72px 28px; }
+.section-inner { max-width: var(--max-doc); margin: 0 auto; }
+.section-h {
+  font-size: clamp(28px, 3.6vw, 40px);
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  margin: 0 0 14px;
+  line-height: 1.15;
+}
+.section-lede {
+  font-size: 17.5px;
+  color: var(--c-fg-muted);
+  max-width: 680px;
+  margin: 0 0 32px;
+  line-height: 1.55;
+}
+.section-lede code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: var(--c-bg-code);
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--c-border);
+}
+
+/* tiles */
+.section-tiles { background: var(--c-bg); }
+.tiles-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  margin-top: 40px;
+}
+.tile {
+  border: 1px solid var(--c-border);
+  border-radius: 12px;
+  padding: 26px 26px 24px;
+  background: var(--c-bg-muted);
+}
+.tile h3 {
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.012em;
+  margin: 0 0 10px;
+  color: var(--c-fg);
+}
+.tile p {
+  margin: 0;
+  color: var(--c-fg-muted);
+  line-height: 1.55;
+  font-size: 15.5px;
+}
+
+/* worked example */
+.section-example { background: var(--c-bg-muted); }
+.example-stack {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 18px;
+  max-width: 920px;
+}
+.example-card {
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  background: var(--c-bg);
+  overflow: hidden;
+}
+.example-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-bg-muted);
+  font-size: 13px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.kind-badge {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  letter-spacing: 0.02em;
+  color: var(--c-accent);
+  font-weight: 600;
+}
+.example-link {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--c-fg-muted);
+}
+.example-link:hover { color: var(--c-accent); }
+.json-card {
+  margin: 0;
+  padding: 18px 20px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--c-fg);
+  overflow-x: auto;
+  white-space: pre;
+  background: var(--c-bg);
+}
+.json-card code { background: none; border: none; padding: 0; font-family: inherit; font-size: 1em; }
+.j-key { color: #0f766e; }
+.j-str { color: #1d4ed8; }
+.j-num { color: #b45309; }
+.j-bool { color: #be185d; }
+.j-null { color: #7a7a82; }
+@media (prefers-color-scheme: dark) {
+  .j-key { color: #5eead4; }
+  .j-str { color: #a5b4fc; }
+  .j-num { color: #fbbf24; }
+  .j-bool { color: #f9a8d4; }
+  .j-null { color: #71717a; }
+}
+.example-foot {
+  margin: 24px 0 0;
+  font-size: 14.5px;
+  color: var(--c-fg-muted);
+  max-width: 720px;
+}
+
+/* prompts */
+.section-prompts { background: var(--c-bg); }
+.prompt-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  max-width: 880px;
+}
+.prompt-list li {
+  border: 1px solid var(--c-border);
+  border-left: 3px solid var(--c-accent);
+  border-radius: 6px;
+  padding: 12px 16px;
+  background: var(--c-bg-muted);
+}
+.prompt-list code {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--c-fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* builders */
+.section-builders { background: var(--c-bg-muted); }
+.section-builders p {
+  font-size: 16.5px;
+  color: var(--c-fg-muted);
+  max-width: 720px;
+  line-height: 1.6;
+  margin: 0 0 28px;
+}
+.builders-links {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  max-width: 880px;
+}
+.builders-links li {
+  padding: 10px 0;
+  border-top: 1px solid var(--c-border);
+  font-size: 16px;
+}
+.builders-links li:last-child { border-bottom: 1px solid var(--c-border); }
+.builders-links a { font-weight: 600; }
+.builders-links .muted { font-size: 14.5px; margin-left: 12px; }
+
 /* ─── responsive ─── */
 @media (max-width: 880px) {
   .layout-doc .doc-shell { grid-template-columns: 1fr; gap: 24px; }
   .sidebar { position: static; max-height: none; border-bottom: 1px solid var(--c-border); padding-bottom: 24px; }
   .footer-row { grid-template-columns: 1fr; gap: 28px; }
   .install-cards { grid-template-columns: 1fr; }
+  .tiles-grid { grid-template-columns: 1fr; }
+  .section { padding: 56px 22px; }
 }
 @media (max-width: 540px) {
   .site-header { padding: 14px 18px; }
   .brand-tag { display: none; }
   .top-nav { gap: 14px; }
   .hero { padding: 56px 18px 48px; }
+  .layout-landing .hero { padding: 56px 18px 48px; }
   .prose { padding: 36px 18px 60px; }
+  .hero-actions { flex-direction: column; align-items: stretch; }
+  .hero-actions .btn { text-align: center; }
+  .builders-links .muted { display: block; margin: 4px 0 0 0; }
 }
 `;
 
@@ -970,12 +1417,15 @@ function build() {
   ensureDir(SITE_DIR);
 
   for (const page of PAGES) {
-    const md = readFileSync(join(REPO_ROOT, page.src), "utf8");
-    const html = renderMarkdownToHtml(md);
-    const rendered =
-      page.layout === "landing" ? landingTemplate(page, html)
-      : page.layout === "page" ? pageTemplate(page, html)
-      : docTemplate(page, html);
+    let rendered;
+    if (page.layout === "landing") {
+      // landing builds its body inline (cards, JSON, prompts) — no markdown
+      rendered = landingTemplate(page);
+    } else {
+      const md = readFileSync(join(REPO_ROOT, page.src), "utf8");
+      const html = renderMarkdownToHtml(md);
+      rendered = page.layout === "page" ? pageTemplate(page, html) : docTemplate(page, html);
+    }
     const outPath = page.slug === "" ? "index.html" : join(page.slug, "index.html");
     writeFile(outPath, rendered);
   }
