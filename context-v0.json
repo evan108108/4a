@@ -19,6 +19,8 @@
     "Role": "schema:Role",
     "Agent": "prov:Agent",
     "Activity": "prov:Activity",
+    "Score": "fa:Score",
+    "Comment": "fa:Comment",
 
     "agent": { "@id": "schema:agent", "@type": "@id" },
     "author": { "@id": "schema:author", "@type": "@id" },
@@ -62,6 +64,13 @@
     "kind": { "@id": "fa:kind", "@type": "xsd:integer" },
     "relay": { "@id": "fa:relay", "@type": "@id", "@container": "@set" },
     "topic": { "@id": "fa:topic", "@container": "@set" },
-    "rotation": { "@id": "fa:rotation", "@type": "xsd:integer" }
+    "rotation": { "@id": "fa:rotation", "@type": "xsd:integer" },
+
+    "fa:value": { "@id": "fa:value", "@type": "xsd:double" },
+    "body": "fa:body",
+    "intent": "fa:intent",
+    "tier": "fa:tier",
+    "preamble": "fa:preamble",
+    "target": { "@id": "fa:target", "@type": "@id" }
   }
 }
