@@ -31,7 +31,17 @@ import { blake3 } from "@noble/hashes/blake3.js";
 const __filename = fileURLToPath(import.meta.url);
 const REPO_ROOT = dirname(dirname(__filename));
 const FIXTURES_DIR = join(REPO_ROOT, "docs", "examples", "phase-3");
-const RELAYS = ["wss://relay.damus.io", "wss://nos.lol", "wss://nostr.wine"];
+// Mirror gateway/src/relay-pool.ts RELAYS. nostr.wine dropped — paid relay
+// (NIP-11 payment_required), rejected free pubkeys during the 2026-04-27
+// reliability hardening pass. Keep this list in sync with the gateway.
+const RELAYS = [
+  "wss://relay.damus.io",
+  "wss://nos.lol",
+  "wss://nostr.mom",
+  "wss://relay.primal.net",
+  "wss://offchain.pub",
+  "wss://nostr.bitcoiner.social",
+];
 const CONTEXT_URL = "https://4a4.ai/ns/v0";
 const GATEWAY_URL = (process.env.GATEWAY_URL || "https://api.4a4.ai").replace(/\/$/, "");
 const INGEST_WAIT_MS = 5000;
