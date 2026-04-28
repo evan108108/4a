@@ -180,10 +180,36 @@ Adds OAuth and KMS-backed signing for users on cloud agent surfaces.
 
 Additional infrastructure cost: KMS calls (~$1 per million), API Gateway cost stays at zero (Worker handles HTTP directly). At 1M publishes/month: ~$1 added cost.
 
+### Phase 3 — credibility events (shipped 2026-04-28)
+
+Adds two 4A-native event kinds that carry first-class credibility signal, with a paired-rationale rule the gateway enforces at publish time.
+
+- New event kinds: `kind:30506` (Score) and `kind:30507` (Comment), both addressable per NIP-33. See [`SPEC.md` → Credibility events](./SPEC.md#credibility-events) for the normative wire format.
+- New write endpoints on the gateway:
+  - `POST /v0/score` — paired-publish convenience. Accepts `{ target, value, rationale, … }`, signs both the `kind:30506` Score and a paired `kind:30507` Comment under the caller's custodial key, fans both out atomically.
+  - `POST /v0/comment` — standalone comment publishing for the recursive-comments case (commenting on any 4A event including other comments).
+- New MCP tools (`score`, `comment`) wired through the same code path as the REST endpoints. Same handler, different surface; the OpenAPI document and the MCP manifest are generated from the same gateway source.
+- No new infrastructure. Score and Comment events ride the same Durable Object → relay pool that the four knowledge-object kinds already use; KMS calls per publish stay at one `GenerateMac` per signed event (two for `/v0/score`'s paired-publish).
+
+### Credibility events — format versus methodology
+
+A deliberate architectural decision: 4A v0 ships the *wire format* for credibility events but **does not ship a reference aggregator**. There is no `aggregator.4a4.ai`, no inline `credibility` block on query responses, no anointed seeds.
+
+Methodology — how to turn a graph of `kind:30506` and `kind:30507` events into a presentable credibility figure — is left to clients, agents, and ecosystem implementations that can compete on opinion. The reasoning, paraphrasing [`SPEC.md` Appendix A](./SPEC.md#appendix-a--aggregation-non-normative): *"4A specifies the shape of score and comment events; it does not specify how aggregators turn a graph of those events into a presentable credibility figure."* This mirrors the Microformats-on-HTML pattern — the substrate carries the conventions; downstream consumers decide what they mean.
+
+Concretely, this means:
+
+- The hosted gateway runs no scoring algorithm and publishes no rollups.
+- The `GET /v0/credibility/:pubkey` endpoint continues to surface NIP-85 trusted assertions from external aggregators (nostr.band, Vertex) as-is. Adding a 4A-native rollup is explicitly deferred.
+- The paired-rationale MUST is enforced at the *publish* layer (the gateway rejects malformed pairings, or accepts a score-only event that aggregators are required to weight zero). It is not enforced at the *aggregation* layer, because aggregation is out of scope.
+- Bad actors get filtered by whichever aggregators a consumer chooses to trust, not by the gateway. Per-aggregator policy disagreement is a feature.
+
+Two worked examples (alice→bob, carol→alice) are published on live relays. See `docs/examples/phase-3/` and the [Phase 3 runbook](./docs/phase-3-credibility-runbook.md) for the operational walkthrough.
+
 ### Phase 2.5+
 
 - NIP submission for 4A event kinds
-- Optional self-hosted aggregator that publishes NIP-85 score assertions over the citation graph
+- Optional ecosystem aggregator(s) that publish NIP-85 score assertions over the score/comment graph (non-normative, not part of 4A)
 - Arweave pinning workflow
 
 ## Cost model
@@ -209,7 +235,7 @@ For comparison, the equivalent AWS-only architecture (Lambda + API Gateway + Far
 - A Parameter Store / Secrets Manager record per user
 - An always-on EC2 / Fargate / App Runner service
 - A Nostr relay
-- A reputation aggregator (Phase 2.5+ may add this; v0 consumes existing assertions from nostr.band, Vertex)
+- A reputation aggregator over the 4A score/comment graph. Phase 3 v0 ships the wire format (`kind:30506` and `kind:30507`) but no aggregator; methodology is non-normative and ecosystem-built. v0 continues to consume external NIP-85 assertions from nostr.band, Vertex, and similar.
 
 If any of these become necessary, they are explicit additions with their own justification, not inheritances from this design.
 
@@ -276,6 +302,7 @@ the KMS signing module — see the Phase 2 AWS setup runbook.
 
 ## Change log
 
+- 2026-04-28 — Phase 3 v0: credibility events shipped. Two new addressable kinds (`30506` Score, `30507` Comment), two new write endpoints (`POST /v0/score`, `POST /v0/comment`), two new MCP tools (`score`, `comment`). No reference aggregator — format-vs-methodology stance recorded in the new "Credibility events — format versus methodology" subsection. Refer to [`SPEC.md` → Credibility events](./SPEC.md#credibility-events) for the normative wire format.
 - 2026-04-27 — Phase 2 / 2: OAuth + JWT module landed in `gateway/src/auth.ts`.
   GitHub provider only in v0; HS256 JWT (24h) for publish-endpoint auth. New
   secrets documented above and in `.env.example`.
