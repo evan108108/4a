@@ -14,7 +14,11 @@
 
 import contextV0 from "../../context-v0.json";
 import { handleApiRequest } from "./api";
-import { handleAuthRequest } from "./auth";
+import {
+  authorizationServerMetadata,
+  handleAuthRequest,
+  protectedResourceMetadata,
+} from "./auth";
 import { handleCommentRequest } from "./comment";
 import { handleMcpRequest } from "./mcp";
 import type { McpHub } from "./mcp";
@@ -59,6 +63,9 @@ export default {
     const host = url.hostname;
 
     if (host === "api.4a4.ai") {
+      if (url.pathname === "/.well-known/oauth-authorization-server" && method === "GET") {
+        return authorizationServerMetadata();
+      }
       if (url.pathname.startsWith("/auth/")) {
         return handleAuthRequest(request, env);
       }
@@ -75,6 +82,9 @@ export default {
     }
 
     if (host === "mcp.4a4.ai") {
+      if (url.pathname === "/.well-known/oauth-protected-resource" && method === "GET") {
+        return protectedResourceMetadata();
+      }
       return handleMcpRequest(request, env);
     }
 
