@@ -418,6 +418,64 @@
         }
       }
     },
+    "/v0/score": {
+      "post": {
+        "operationId": "publishScore",
+        "summary": "Publish a paired 4A score and rationale",
+        "description": "Publish a 4A Score (kind 30506) atomically paired with a rationale Comment (kind 30507) per SPEC.md §Credibility events. The gateway signs both events under the caller's 4A pubkey and fans them out to the configured relays. Per the Phase 3 paired-rationale rule (§4.1), aggregators treat unjustified scores as weight-zero — this endpoint exists so callers don't accidentally publish unpaired scores. Requires the `publish` OAuth scope.",
+        "security": [{ "oauth2": ["publish"] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ScoreBody" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Both events signed; the score was accepted by at least one relay. The comment's per-relay outcome is reported in `relay_acks.comment` and may include `rate-limited-retrying` entries which the gateway retries in the background.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PairedPublishResult" }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error: `value` outside [0, 1], `rationale` empty/whitespace, `target_event_id` not 64-char hex, or `target_a_tag` not a kind:pubkey:d address.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid OAuth token.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "429": {
+            "description": "Per-identity publish rate limit exceeded.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          },
+          "502": {
+            "description": "No relays accepted the score event; the rationale comment was not published.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v0/attest": {
       "post": {
         "operationId": "attest",
@@ -943,6 +1001,132 @@
           "dSlug": {
             "type": "string",
             "description": "Optional explicit `d` tag."
+          }
+        }
+      },
+      "ScoreBody": {
+        "type": "object",
+        "description": "Body for POST /v0/score. The gateway publishes both a kind:30506 score and a kind:30507 rationale comment under the caller's 4A pubkey. The score's `d` tag is set to `target_event_id`; the comment's `d` tag is `justify-<first-8-of-score-id>` and its `e` tag references the score event id.",
+        "required": [
+          "target_event_id",
+          "value",
+          "rationale"
+        ],
+        "properties": {
+          "target_event_id": {
+            "type": "string",
+            "description": "64-char lowercase hex Nostr event id of the object being scored.",
+            "examples": [
+              "9f8e7d6c5b4a39281706f5e4d3c2b1a0908070605040302010f0e0d0c0b0a090"
+            ]
+          },
+          "value": {
+            "type": "number",
+            "description": "Numeric score in the closed interval [0.0, 1.0]. Must be a number, not a stringified number.",
+            "minimum": 0,
+            "maximum": 1,
+            "examples": [
+              0.82
+            ]
+          },
+          "rationale": {
+            "type": "string",
+            "description": "Prose justification for the score. Becomes the `body` of the paired kind:30507 rationale comment. Must be non-empty after trim.",
+            "examples": [
+              "Reproduced the benchmark on commit 7f3c. Wall-clock improvement matched within ±2%. Cold-start path not reproduced — that's the 0.18 I held back."
+            ]
+          },
+          "tier": {
+            "type": "string",
+            "description": "Optional categorical tier (e.g. `verified`, `contested`, `draft`) embedded in the score's JSON-LD content. Vocabulary is non-normative; aggregators interpret as they choose.",
+            "examples": [
+              "verified"
+            ]
+          },
+          "intent": {
+            "type": "string",
+            "description": "Optional intent classifier on the rationale comment's content (e.g. `justify`, `challenge`, `clarify`). Defaults to `justify`.",
+            "examples": [
+              "justify"
+            ]
+          },
+          "target_a_tag": {
+            "type": "string",
+            "description": "Optional `kind:pubkey:d` address of the target when it is itself an addressable 4A object. When present, copied into the score's `a` tag alongside the `e` tag.",
+            "examples": [
+              "30501:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210:next-jit-claim-1"
+            ]
+          }
+        }
+      },
+      "PairedPublishResult": {
+        "type": "object",
+        "description": "Successful paired publish response. Both events are signed; the score was accepted by at least one relay. The comment's per-relay outcomes are surfaced in `relay_acks.comment` rather than rolled back — Nostr has no rollback. Use the comment's `d`-tag to supersede if needed.",
+        "required": [
+          "ok",
+          "score_event_id",
+          "comment_event_id",
+          "score_address",
+          "comment_address",
+          "pubkey",
+          "npub",
+          "relay_acks"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "examples": [true]
+          },
+          "score_event_id": {
+            "type": "string",
+            "description": "64-char hex Nostr event id of the published kind:30506 score event.",
+            "examples": [
+              "5a2c3f9e4b1d7a6e8c0f1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f"
+            ]
+          },
+          "comment_event_id": {
+            "type": "string",
+            "description": "64-char hex Nostr event id of the paired kind:30507 rationale comment.",
+            "examples": [
+              "1a2b3c4d5e6f7890abcdef1234567890abcdef1234567890abcdef1234567890"
+            ]
+          },
+          "score_address": {
+            "type": "string",
+            "description": "Addressable identifier `30506:<caller-pubkey>:<target_event_id>` for the score event.",
+            "examples": [
+              "30506:abc123def4567890abc123def4567890abc123def4567890abc123def4567890:9f8e7d6c5b4a39281706f5e4d3c2b1a0908070605040302010f0e0d0c0b0a090"
+            ]
+          },
+          "comment_address": {
+            "type": "string",
+            "description": "Addressable identifier `30507:<caller-pubkey>:justify-<first-8-of-score-id>` for the rationale comment.",
+            "examples": [
+              "30507:abc123def4567890abc123def4567890abc123def4567890abc123def4567890:justify-5a2c3f9e"
+            ]
+          },
+          "pubkey": {
+            "type": "string",
+            "description": "Caller's derived 64-char hex 4A pubkey."
+          },
+          "npub": {
+            "type": "string",
+            "description": "Caller's pubkey encoded as bech32 npub."
+          },
+          "relay_acks": {
+            "type": "object",
+            "description": "Per-relay acknowledgment outcomes for the score and the comment, in publish order. The score sub-array contains at least one entry with status=`accepted`; the comment sub-array may include `rate-limited-retrying` entries which the gateway will retry in the background.",
+            "required": ["score", "comment"],
+            "properties": {
+              "score": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/RelayResult" }
+              },
+              "comment": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/RelayResult" }
+              }
+            }
           }
         }
       },

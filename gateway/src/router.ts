@@ -19,6 +19,7 @@ import { handleMcpRequest } from "./mcp";
 import type { McpHub } from "./mcp";
 import { handlePublishRequest } from "./publish";
 import type { RelayPool } from "./relay-pool";
+import { handleScoreRequest } from "./score";
 
 export { RelayPool } from "./relay-pool";
 export { McpHub } from "./mcp";
@@ -62,6 +63,9 @@ export default {
       }
       if (url.pathname.startsWith("/v0/publish/") || url.pathname === "/v0/attest") {
         return handlePublishRequest(request, env);
+      }
+      if (url.pathname === "/v0/score") {
+        return handleScoreRequest(request, env);
       }
       return handleApiRequest(request, env);
     }

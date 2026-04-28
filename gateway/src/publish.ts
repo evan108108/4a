@@ -96,7 +96,7 @@ class ValidationError extends Error {}
 
 const rateLimitWindow = new Map<string, number[]>();
 
-function rateLimitCheck(key: string): { ok: true } | { ok: false; retryAfterMs: number } {
+export function rateLimitCheck(key: string): { ok: true } | { ok: false; retryAfterMs: number } {
   const now = Date.now();
   const cutoff = now - RATE_LIMIT_WINDOW_MS;
   const stamps = (rateLimitWindow.get(key) ?? []).filter((t) => t > cutoff);
@@ -126,7 +126,7 @@ export type RelayStatus =
   | "rate-limited-retrying"
   | "failed-permanent";
 
-interface RelayResult {
+export interface RelayResult {
   relay: string;
   status: RelayStatus;
   // Backward-compat with v0 OpenAPI consumers: true iff status === "accepted".
@@ -213,7 +213,7 @@ async function publishToRelay(relay: string, event: SignedEvent): Promise<RelayR
   }
 }
 
-async function fanOut(event: SignedEvent): Promise<RelayResult[]> {
+export async function fanOut(event: SignedEvent): Promise<RelayResult[]> {
   return Promise.all(RELAYS.map((relay) => publishToRelay(relay, event)));
 }
 
