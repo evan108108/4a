@@ -21,7 +21,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { blake3 } from "@noble/hashes/blake3.js";
+import { blake3ContentTag } from "./lib/blake3-tag";
 
 // Default relay set (2026-04-27 hardening). nostr.wine dropped — paid relay,
 // requires admission payment + restricted_writes:true (NIP-11 confirmed
@@ -85,24 +85,6 @@ interface RetryRecord {
   nextAttemptAt: number;
 }
 
-const BASE32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
-
-function base32Encode(bytes: Uint8Array): string {
-  let bits = 0;
-  let value = 0;
-  let out = "";
-  for (let i = 0; i < bytes.length; i++) {
-    value = (value << 8) | bytes[i]!;
-    bits += 8;
-    while (bits >= 5) {
-      out += BASE32_ALPHABET[(value >>> (bits - 5)) & 31];
-      bits -= 5;
-    }
-  }
-  if (bits > 0) out += BASE32_ALPHABET[(value << (5 - bits)) & 31];
-  return out;
-}
-
 function fromHex(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length >>> 1);
   for (let i = 0; i < out.length; i++) {
@@ -131,10 +113,6 @@ function findTagValues(tags: string[][], name: string): string[] {
 function canonicalEventId(e: NostrEvent): string {
   const serialized = JSON.stringify([0, e.pubkey, e.created_at, e.kind, e.tags, e.content]);
   return toHex(sha256(new TextEncoder().encode(serialized)));
-}
-
-function expectedBlake3Tag(content: string): string {
-  return "bk-" + base32Encode(blake3(new TextEncoder().encode(content)));
 }
 
 function isValidEvent(e: unknown): e is NostrEvent {
@@ -464,7 +442,7 @@ export class RelayPool extends DurableObject<unknown> {
     if (canonicalEventId(event) !== event.id) return;
     if (!schnorr.verify(fromHex(event.sig), fromHex(event.id), fromHex(event.pubkey))) return;
     const blake3Tag = findTag(event.tags, "blake3");
-    if (!blake3Tag || blake3Tag !== expectedBlake3Tag(event.content)) return;
+    if (!blake3Tag || blake3Tag !== blake3ContentTag(event.content)) return;
     const dTag = findTag(event.tags, "d");
     if (!dTag) return;
 

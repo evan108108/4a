@@ -12,9 +12,9 @@
 // over fresh outbound WebSockets. The read-side RelayPool ingests the same
 // events through its persistent subscription — we don't share connections.
 
-import { blake3 } from "@noble/hashes/blake3.js";
 import { nip19 } from "nostr-tools";
 import { verifyJwt, type AuthClaims, type AuthEnv } from "./auth";
+import { blake3ContentTag } from "./lib/blake3-tag";
 import {
   deriveNostrKey,
   signEventWithDerivedKey,
@@ -55,25 +55,6 @@ const JSON_HEADERS: Record<string, string> = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store",
 };
-
-// ─── BLAKE3 content tag (must match scripts/genesis.mjs and relay-pool.ts) ──
-const BASE32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
-function base32Encode(bytes: Uint8Array): string {
-  let bits = 0, value = 0, out = "";
-  for (let i = 0; i < bytes.length; i++) {
-    value = (value << 8) | bytes[i]!;
-    bits += 8;
-    while (bits >= 5) {
-      out += BASE32_ALPHABET[(value >>> (bits - 5)) & 31];
-      bits -= 5;
-    }
-  }
-  if (bits > 0) out += BASE32_ALPHABET[(value << (5 - bits)) & 31];
-  return out;
-}
-function blake3ContentTag(content: string): string {
-  return "bk-" + base32Encode(blake3(new TextEncoder().encode(content)));
-}
 
 // ─── slug helpers ───────────────────────────────────────────────────────────
 
