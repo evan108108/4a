@@ -1,0 +1,34 @@
+{
+  "kind": 30507,
+  "created_at": 1777387109,
+  "tags": [
+    [
+      "d",
+      "justify-4eabeb6b"
+    ],
+    [
+      "e",
+      "4eabeb6bdb490435b511f47450efa821892e7c7112906c672001f971a2e89fe7"
+    ],
+    [
+      "a",
+      "30506:4f234ca09ed68824be7b50dfbba5e3b14e0006ae2749207b23de5a0b8c77782c:8bb425867e51424c02bc7cc76aae6df4f138b3448fb847daeec0ad5f80b16448"
+    ],
+    [
+      "blake3",
+      "bk-jyzgjkwzija22aux2gahjyi4h2bfevqirkv6m3mvl5oforos3zbq"
+    ],
+    [
+      "alt",
+      "rationale for score 0.82 of 4eabeb6b…"
+    ],
+    [
+      "fa:context",
+      "https://4a4.ai/ns/v0"
+    ]
+  ],
+  "content": "{\"@context\":\"https://4a4.ai/ns/v0\",\"@type\":\"Comment\",\"intent\":\"justify\",\"body\":\"Reproduced the benchmark on commit 7f3c with identical wall-clock numbers (±2%). The claim's confidence interval seems tight but within tolerance for the workload class. Marking 0.82 rather than 0.95 because I did not reproduce the cold-start path.\",\"target\":{\"@id\":\"nostr:4eabeb6bdb490435b511f47450efa821892e7c7112906c672001f971a2e89fe7\"}}",
+  "pubkey": "4f234ca09ed68824be7b50dfbba5e3b14e0006ae2749207b23de5a0b8c77782c",
+  "id": "eedf907432dfe7d52d7733a8d02c7baa549d436118e4bfe9dd23e041f49e685d",
+  "sig": "e084d34714a421098ff4f41964171ba20071d6a6349b2149cb508c7cb44484540caf8afe68b9b83dde94715e5d6d74ec6c7836361e746f82785cfb1a0cd5b175"
+}

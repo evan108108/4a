@@ -1,0 +1,34 @@
+{
+  "kind": 30507,
+  "created_at": 1777387109,
+  "tags": [
+    [
+      "d",
+      "justify-8c2cdeed"
+    ],
+    [
+      "e",
+      "8c2cdeed0cd99a4e8ab2554e9bfb7645c66f7bbf5a6ef402cde0ef44720087ba"
+    ],
+    [
+      "a",
+      "30506:f5d87b6e7d06a5adb27c51ad8421503ab629c45aa851d50b0b85f6c7aaa5306d:4eabeb6bdb490435b511f47450efa821892e7c7112906c672001f971a2e89fe7"
+    ],
+    [
+      "blake3",
+      "bk-qah3k4ayrdrhexcggdfpy5xgszrsudng63kabfdhmprkios4fmdq"
+    ],
+    [
+      "alt",
+      "rationale for score 0.55 of 8c2cdeed…"
+    ],
+    [
+      "fa:context",
+      "https://4a4.ai/ns/v0"
+    ]
+  ],
+  "content": "{\"@context\":\"https://4a4.ai/ns/v0\",\"@type\":\"Comment\",\"intent\":\"challenge\",\"body\":\"Alice's reproduction is solid but underweights the cold-start regression that ships in the same release. The benchmark she ran does not exercise the new constant-pool path. Holding her score at 0.55 because the methodology is sound but the scope is incomplete.\",\"target\":{\"@id\":\"nostr:8c2cdeed0cd99a4e8ab2554e9bfb7645c66f7bbf5a6ef402cde0ef44720087ba\"}}",
+  "pubkey": "f5d87b6e7d06a5adb27c51ad8421503ab629c45aa851d50b0b85f6c7aaa5306d",
+  "id": "1570d2c56f215d4da08931735d0b534ed19e285716cdb6a0584c1c5a03e32259",
+  "sig": "ebb70a08ea32eff4d85a1932d8a2c89b84e67f611379105064ab1a2f8818a515114ec9e611a1e94e41ebaf3c7e047dd97a62dac4cbf83a504838356f0a65f9e0"
+}

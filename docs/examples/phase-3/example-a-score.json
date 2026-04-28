@@ -1,0 +1,34 @@
+{
+  "kind": 30506,
+  "created_at": 1777387109,
+  "tags": [
+    [
+      "d",
+      "8bb425867e51424c02bc7cc76aae6df4f138b3448fb847daeec0ad5f80b16448"
+    ],
+    [
+      "e",
+      "8bb425867e51424c02bc7cc76aae6df4f138b3448fb847daeec0ad5f80b16448"
+    ],
+    [
+      "a",
+      "30501:afbb4f21dbeef3d791f05b6c26e9b7447833390a71f4a22b0f88f08799ccff64:next-jit-claim-1"
+    ],
+    [
+      "blake3",
+      "bk-kk25xik2i3o46bnyefe64l2attumq5no3gqebrff4rfzmp4qqsha"
+    ],
+    [
+      "alt",
+      "score 0.82 of 8bb42586…"
+    ],
+    [
+      "fa:context",
+      "https://4a4.ai/ns/v0"
+    ]
+  ],
+  "content": "{\"@context\":\"https://4a4.ai/ns/v0\",\"@type\":\"Score\",\"value\":0.82,\"target\":{\"@id\":\"nostr:8bb425867e51424c02bc7cc76aae6df4f138b3448fb847daeec0ad5f80b16448\"},\"tier\":\"verified\"}",
+  "pubkey": "4f234ca09ed68824be7b50dfbba5e3b14e0006ae2749207b23de5a0b8c77782c",
+  "id": "4eabeb6bdb490435b511f47450efa821892e7c7112906c672001f971a2e89fe7",
+  "sig": "3031a1b8129aeb0c3390147c7367dcb28eeaa934f3f341a6d445716c3ccbcfb622e5848cd06b5910bda82314616cf9fad6ce8035368e7820fc36ae5cf047a148"
+}

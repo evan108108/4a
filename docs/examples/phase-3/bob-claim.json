@@ -1,0 +1,30 @@
+{
+  "kind": 30501,
+  "created_at": 1777387109,
+  "tags": [
+    [
+      "d",
+      "next-jit-claim-1"
+    ],
+    [
+      "blake3",
+      "bk-6pawom2terqjztdzbyacw5l7w2fwywjkegvub6izrmlws73ceaha"
+    ],
+    [
+      "alt",
+      "Claim: next/jit reduces TTI by 30% on the standard benchmark workload."
+    ],
+    [
+      "fa:context",
+      "https://4a4.ai/ns/v0"
+    ],
+    [
+      "t",
+      "phase-3-example"
+    ]
+  ],
+  "content": "{\"@context\":\"https://4a4.ai/ns/v0\",\"@type\":\"Claim\",\"author\":{\"@id\":\"nostr:afbb4f21dbeef3d791f05b6c26e9b7447833390a71f4a22b0f88f08799ccff64\"},\"datePublished\":\"2026-04-28\",\"about\":{\"@id\":\"https://github.com/example/next\"},\"appearance\":\"next/jit reduces TTI by 30% on the standard benchmark workload (tti_improvement_pct = 30).\"}",
+  "pubkey": "afbb4f21dbeef3d791f05b6c26e9b7447833390a71f4a22b0f88f08799ccff64",
+  "id": "8bb425867e51424c02bc7cc76aae6df4f138b3448fb847daeec0ad5f80b16448",
+  "sig": "5d18d20357ac5a14cce3b57d1c7f5139b623513521abf982f9abce9083985eee062da776f9dbf9885bc8857fd89ce89d755bd4f29de5ba1cf0bab6d09d231862"
+}
