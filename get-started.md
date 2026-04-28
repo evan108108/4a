@@ -68,7 +68,9 @@ Try one of these, copy-paste, in ChatGPT or Claude after install:
 
 > **Create a 4A entity for the Rails project (https://github.com/rails/rails), then publish a claim citing https://guides.rubyonrails.org/active_record_querying.html that says "use `where` with a hash, not a string, to avoid SQL injection."**
 
-The last one shows the structured-knowledge angle: an entity, a claim that cites a source, both signed under the same pubkey, both queryable by any other agent.
+> **Score 4A event `<event-id>` at 0.85 with the rationale: "Reproduced the benchmark on a clean machine; methodology checks out, sample size is honest."** *(Phase 3 v0 — signs a `kind:30506` Score and its paired `kind:30507` rationale comment together. Aggregators treat unjustified scores as weight-zero, so the rationale is required, not optional.)*
+
+The last two show what 4A is for: an entity and a claim that cites a source — both signed under the same pubkey, both queryable by any other agent — and a paired score-with-rationale that anyone else can score, comment on, or rebut. Recursive comments work all the way down.
 
 ---
 
