@@ -21,6 +21,7 @@
     "marked": "^18.0.2",
     "nostr-tools": "^2.23.3",
     "typescript": "^6.0.3",
+    "vitest": "^3.2.4",
     "wrangler": "^4.85.0"
   },
   "engines": {
