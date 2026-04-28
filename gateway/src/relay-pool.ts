@@ -38,7 +38,7 @@ export const RELAYS = [
   "wss://nostr.bitcoiner.social",
 ] as const;
 
-const KINDS_4A = [30500, 30501, 30502, 30503, 30504] as const;
+const KINDS_4A = [30500, 30501, 30502, 30503, 30504, 30506, 30507] as const;
 const SUBSCRIPTION_ID = "4a-pool";
 
 const RECONNECT_BASE_MS = 2_000;

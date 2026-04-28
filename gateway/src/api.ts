@@ -18,6 +18,8 @@ const KIND_BY_NAME: Record<string, number> = {
   entity: 30502,
   relation: 30503,
   commons: 30504,
+  score: 30506,
+  comment: 30507,
 };
 
 const VALID_KINDS = new Set(Object.values(KIND_BY_NAME));
@@ -162,7 +164,7 @@ async function handleObject(rawAddress: string, env: ApiEnv): Promise<Response> 
 
   const kind = Number(kindStr);
   if (!Number.isInteger(kind) || !VALID_KINDS.has(kind)) {
-    return errorResponse("bad_request", `unknown kind '${kindStr}' — must be 30500..30504`, 400);
+    return errorResponse("bad_request", `unknown kind '${kindStr}' — must be 30500..30504, 30506, or 30507`, 400);
   }
   const pubkeyHex = normalizePubkey(pubkey);
   if (!pubkeyHex) return errorResponse("bad_request", `pubkey must be 64-char hex or npub1...`, 400);
