@@ -16,6 +16,14 @@
 | **30504** | `fa:Commons` | A pubkey declaring itself the commons for a topic or project | Addressable by `d` (topic slug) |
 | **30506** | `fa:Score` | A signed, weighted opinion about a target 4A object | Addressable by `d` (target event id) |
 | **30507** | `fa:Comment` | A signed prose response targeting any 4A event | Addressable by `d` (per-comment slug) |
+| **30510** | `fa:EncryptedObservation` | Audience-addressed Observation (NIP-44 v2 to epoch pubkey) | Addressable by `d` |
+| **30511** | `fa:EncryptedClaim` | Audience-addressed Claim | Addressable by `d` |
+| **30512** | `fa:EncryptedEntity` | Audience-addressed Entity | Addressable by `d` |
+| **30513** | `fa:EncryptedRelation` | Audience-addressed Relation | Addressable by `d` |
+| **30514** | `fa:EncryptedCommons` | Audience-addressed Commons | Addressable by `d` |
+| **30520** | `fa:Audience` | Audience declaration: identity, current epoch, public roster | Addressable by `d` (audience slug) |
+| **30521** | `fa:KeyGrant` | NIP-44 v2 ciphertext delivering an audience epoch private key to one recipient | Addressable by composite `d` (`audience-slug:epoch:recipient-hex`) |
+| **30522** | `fa:AudienceClaim` | Off-band claim signed by an invite throwaway key, requesting a real key-grant | Addressable by composite `d` (`audience-slug:epoch:invite-pub-hex`) |
 
 These numbers are **placeholders** chosen from an apparently unreserved block in the 30000 range. Before v0 ships the spec should either (a) submit a NIP reserving the block or (b) pick the first five contiguous unassigned slots in 30000–39999 after a fresh registry check against [nostr-protocol/nips](https://github.com/nostr-protocol/nips).
 
@@ -26,6 +34,8 @@ Known constraints that narrowed the choice:
 - 39000–39009 is NIP-29 group metadata. Do not use this range despite superficial cuteness.
 
 The 30500–30509 block reads unassigned at the time of writing. Reserve 30500–30519 to leave room for post-v0 kinds (pin declarations, aggregator rollups, response/reply objects) without fragmentation. Kinds **30506** (`fa:Score`) and **30507** (`fa:Comment`) are now defined; see [`SPEC.md` § Credibility events](./SPEC.md#credibility-events) for normative shape, paired-rationale rules, and supersession behavior.
+
+The encrypted-variant block (30510–30514) and the v0.5 audience block (30520, 30521, 30522) were assigned by [`SPEC-v0.5.md`](./SPEC-v0.5.md). The 30523–30529 range is reserved for future v0.5 audience-side metadata kinds; see [`SPEC-v0.5.md` § 8](./SPEC-v0.5.md#8-reserved-but-unused-kinds).
 
 ## Required tags
 
@@ -220,13 +230,15 @@ An MCP gateway subscribes to a chosen set of relays with filters like:
 
 Clients that don't recognize 4A kinds fall back to the `alt` tag for a human-readable summary. Clients that understand the kinds parse `content` as JSON-LD against the 4A context.
 
-## Reserved but unused (v0)
+## Reserved but unused
 
 Leave these slots unclaimed pending experience:
 
 - 30505 and 30508–30509 — pin declarations, aggregator rollups, response/reply objects, disputes. Design after v0 adoption data. (Kinds 30506 and 30507 are now defined for `Score` and `Comment` respectively.)
-- 30510–30514 — encrypted variants of 30500–30504 (private mode). Reserved 1:1 with the public kinds (30510 = encrypted Observation, 30511 = encrypted Claim, etc.). See [`SPEC.md`](./SPEC.md) → "Future work — private mode" for the anticipated design. Implementations MUST NOT publish in this range until the encrypted-variant specification is finalized.
 - 30515–30519 — further post-v0 kinds.
+- 30523–30529 — future v0.5 audience-side metadata events (rotation announcements, audience-scoped credibility wrappers, audience subscription endorsements). Implementations MUST NOT publish in this range until a successor SPEC defines specific semantics. See [`SPEC-v0.5.md` § 8](./SPEC-v0.5.md#8-reserved-but-unused-kinds).
+
+The encrypted-variant block 30510–30514 and the audience-management kinds 30520, 30521, 30522 are now defined by [`SPEC-v0.5.md`](./SPEC-v0.5.md). Implementations MUST follow that spec when publishing in those ranges.
 
 ## Open questions for the NIP submission
 
@@ -239,3 +251,4 @@ Leave these slots unclaimed pending experience:
 
 - 2026-04-24 — initial draft. Kinds assigned tentatively; subject to NIP review.
 - 2026-04-28 — Added kind 30506 (`fa:Score`) and kind 30507 (`fa:Comment`) for Phase 3 credibility events. Normative shape lives in [`SPEC.md` § Credibility events](./SPEC.md#credibility-events).
+- 2026-04-28 — Confirmed encrypted-variant kinds 30510–30514 and assigned v0.5 audience-management kinds 30520 (`fa:Audience`), 30521 (`fa:KeyGrant`), 30522 (`fa:AudienceClaim`). Reserved 30523–30529 for future v0.5 audience metadata. Normative shapes live in [`SPEC-v0.5.md`](./SPEC-v0.5.md).
