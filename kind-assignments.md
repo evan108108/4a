@@ -37,6 +37,8 @@ The 30500–30509 block reads unassigned at the time of writing. Reserve 30500�
 
 The encrypted-variant block (30510–30514) and the v0.5 audience block (30520, 30521, 30522) were assigned by [`SPEC-v0.5.md`](./SPEC-v0.5.md). The 30523–30529 range is reserved for future v0.5 audience-side metadata kinds; see [`SPEC-v0.5.md` § 8](./SPEC-v0.5.md#8-reserved-but-unused-kinds).
 
+The **30530–30539 range is reserved for Sonata Studio kinds** (`fa:StudioCard`, `fa:StudioTrack`, `fa:StudioDispatchIntent`, `fa:StudioComment`, `fa:StudioQuestion`, `fa:StudioAnswer`, `fa:StudioRoom`, plus headroom). Studio is a 4A application built on top of v0.5 audiences — the kinds carry Studio-specific JSON-LD payloads (context: `https://sonata.4a4.ai/ns/studio-v0`) and are always audience-addressed (NIP-44 to the epoch pubkey, NIP-17 gift-wrapped per member). Normative shapes will be specified by the forthcoming `studio-v0` spec; this reservation only holds the kind block so v0.5-era work doesn't squat on it. See [`sonata-studio-v0-design.md`](/Users/evan/memory/claude/documents/evenflow/sonata-studio-v0-design.md) for the application-level design.
+
 ## Required tags
 
 Every 4A event carries these in addition to the Nostr envelope:
