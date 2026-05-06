@@ -47,6 +47,10 @@ export const RELAYS = [
 // so the local cache stays consistent without joining the global firehose.
 const KINDS_4A = [30500, 30501, 30502, 30503, 30504, 30506, 30507] as const;
 const AUDIENCE_KINDS = [30510, 30511, 30512, 30513, 30514, 30520, 30521, 30522] as const;
+
+// Gift-wraps (kind:1059) are recipient-addressable but carry no `d` tag, so
+// they're stored under a separate prefix indexed by recipient pubkey.
+const GIFT_WRAP_PREFIX = "giftwrap:";
 const SUBSCRIPTION_ID = "4a-pool";
 
 const RECONNECT_BASE_MS = 2_000;
@@ -235,6 +239,60 @@ export class RelayPool extends DurableObject<unknown> {
     }
     await this.ctx.storage.put(key, event);
     return { ok: true };
+  }
+
+  /**
+   * Cache a kind:1059 gift-wrap addressed to the given recipient pubkey.
+   * Indexed by `giftwrap:<recipient>:<created_at>:<id>` so /audience/:slug/inbox
+   * can list-by-prefix for a recipient + apply a `since` filter.
+   *
+   * The gateway's /audience/publish path calls this for every gift-wrap it
+   * fans out, so a same-instance publisher → inbox reader pair (e.g. the
+   * worked-example fixture) doesn't need an external relay subscription.
+   * For cross-instance reads, the gateway would still need to subscribe to
+   * external relays for kinds:[1059], #p:[user_pub] — tracked as a t15
+   * follow-up.
+   */
+  async storeGiftWrap(event: NostrEvent, recipient: string): Promise<{ ok: boolean; reason?: string }> {
+    if (event.kind !== 1059) return { ok: false, reason: "kind must be 1059" };
+    if (canonicalEventId(event) !== event.id) {
+      return { ok: false, reason: "id mismatch" };
+    }
+    if (!schnorr.verify(fromHex(event.sig), fromHex(event.id), fromHex(event.pubkey))) {
+      return { ok: false, reason: "signature verification failed" };
+    }
+    if (!/^[0-9a-f]{64}$/i.test(recipient)) {
+      return { ok: false, reason: "recipient must be 32-byte hex" };
+    }
+    // Pad created_at to 12 chars so lexicographic ordering matches numeric.
+    const ts = String(event.created_at).padStart(12, "0");
+    const key = `${GIFT_WRAP_PREFIX}${recipient.toLowerCase()}:${ts}:${event.id}`;
+    await this.ctx.storage.put(key, event);
+    return { ok: true };
+  }
+
+  /**
+   * Fetch cached gift-wraps addressed to `recipient`. Optional `sinceUnix`
+   * filters to wraps with `created_at >= sinceUnix` (best-effort; the gift-
+   * wrap created_at is jittered in the past per NIP-59). Returns up to
+   * `limit` events, oldest-first.
+   */
+  async listGiftWraps(
+    recipient: string,
+    sinceUnix?: number,
+    limit = 100,
+  ): Promise<NostrEvent[]> {
+    if (!/^[0-9a-f]{64}$/i.test(recipient)) return [];
+    const list = await this.ctx.storage.list<NostrEvent>({
+      prefix: `${GIFT_WRAP_PREFIX}${recipient.toLowerCase()}:`,
+    });
+    const out: NostrEvent[] = [];
+    for (const ev of list.values()) {
+      if (sinceUnix !== undefined && ev.created_at < sinceUnix) continue;
+      out.push(ev);
+      if (out.length >= limit) break;
+    }
+    return out;
   }
 
   async listCommons(): Promise<NostrEvent[]> {

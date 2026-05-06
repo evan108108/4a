@@ -574,6 +574,93 @@ async function runClaim(body: ClaimBody, env: AudienceEnv): Promise<Response> {
   });
 }
 
+// ─── /v0/audience/process-claims ────────────────────────────────────────────
+//
+// Polled equivalent of the §4 claim-watcher (PLAN-v0.5 t13). Cloudflare
+// Workers don't run long-lived per-inviter subscriptions cheaply; the gateway
+// instead exposes a poll endpoint the inviter (or their cron) calls to scan
+// for kind:30522 events addressed to their pubkey on the audience and rotate
+// once per pending invite that's been claimed.
+//
+// Idempotency: rotate-on-claim removes the matching fa:pending entry, so a
+// second call with the same claim is a no-op (the invite_pub is no longer
+// pending and new pending entries don't appear by themselves).
+
+interface ProcessClaimsBody {
+  audience_address: string;
+  aud_id_priv: Uint8Array;
+}
+
+function validateProcessClaimsBody(raw: Record<string, unknown>): ProcessClaimsBody {
+  return {
+    audience_address: requireString(raw.audience_address, "audience_address"),
+    aud_id_priv: requireHex64Bytes(raw.aud_id_priv, "aud_id_priv"),
+  };
+}
+
+async function runProcessClaims(
+  body: ProcessClaimsBody,
+  claims: AuthClaims,
+  env: AudienceEnv,
+): Promise<Response> {
+  const { audIdPub, slug } = requireAddress(body.audience_address, "audience_address");
+  if (pubkeyFromPriv(body.aud_id_priv) !== audIdPub) {
+    return jsonError("unauthorized", "aud_id_priv does not match audience_address", 401);
+  }
+  const cached = await lookupDeclarationByAddress(audIdPub, slug, env);
+  if (!cached) {
+    return jsonError("not_found", "audience declaration not found in relay cache", 404);
+  }
+
+  // Walk current pending invites; for each one, look for a kind:30522 with
+  // d=<slug>:<epoch>:<invite_pub> in local cache. If found, treat it as a
+  // claimed invite and queue the (invite_pub, claim_pubkey) for rotation.
+  const id = env.RELAY_POOL.idFromName("main");
+  const stub = env.RELAY_POOL.get(id);
+
+  const claimed: { invitePub: string; claimPubkey: string; claim_event_id: string }[] = [];
+  for (const pending of cached.decl.pending) {
+    const dTag = `${slug}:${cached.decl.epoch}:${pending.invitePub}`;
+    const claimEvt = await stub.getObject(30522, pending.invitePub, dTag);
+    if (!claimEvt) continue;
+    // Find fa:claim-pubkey tag.
+    const claimPubTag = claimEvt.tags.find((t) => t[0] === "fa:claim-pubkey")?.[1];
+    if (!claimPubTag) continue;
+    const validation = validateAudienceClaimEvent(claimEvt, {
+      currentDeclarationByAddress: () => cached.decl,
+    });
+    if (!validation.ok) continue;
+    claimed.push({
+      invitePub: pending.invitePub,
+      claimPubkey: claimPubTag,
+      claim_event_id: claimEvt.id,
+    });
+  }
+
+  if (claimed.length === 0) {
+    return jsonResponse({ ok: true, claimed: [], rotated: false });
+  }
+
+  // One rotation handles all claimed invites at once.
+  const rotateBody: RotateBody = {
+    audience_address: body.audience_address,
+    aud_id_priv: body.aud_id_priv,
+    add_members: claimed.map((c) => c.claimPubkey),
+    remove_members: [],
+    remove_pending: claimed.map((c) => c.invitePub),
+  };
+  const rotateResp = await runRotate(rotateBody, claims, env);
+  if (!rotateResp.ok) return rotateResp;
+  const rotateJson = (await rotateResp.json()) as Record<string, unknown>;
+
+  return jsonResponse({
+    ok: true,
+    claimed,
+    rotated: true,
+    rotation: rotateJson,
+  });
+}
+
 // ─── /v0/audience/rotate ────────────────────────────────────────────────────
 
 interface RotateBody {
@@ -767,24 +854,16 @@ async function runAudiencePublish(
   });
   const rumor = signEventWithRawKey(rumorTpl, publisherPriv);
 
-  // 3. For each member, gift-wrap the rumor and publish the wrap.
+  // 3. For each member, gift-wrap the rumor, publish the wrap, and cache it
+  //    in the relay-pool DO under the recipient's giftwrap index so the same-
+  //    instance inbox endpoint can read it without an external subscription.
   const wraps: { recipient: string; event_id: string; acks: RelayResult[] }[] = [];
+  const id = env.RELAY_POOL.idFromName("main");
+  const stub = env.RELAY_POOL.get(id);
   for (const recipient of cached.decl.members) {
-    const wrappedEvent = giftWrapEvent(rumor, publisherPriv, recipient);
-    const wrapSigned: SignedEvent = wrappedEvent;
-    const out = await publishAndStore(wrapSigned, env).catch(async () => ({
-      signed: wrapSigned,
-      acks: await fanOut(wrapSigned),
-      accepted: false,
-    } as PublishOutcome));
-    // storeAudienceEvent rejects 1059 (it's not in AUDIENCE_KINDS); fanOut
-    // happens regardless, that's the load-bearing call. Capture acks via the
-    // catch-fallback so a non-cacheable kind still publishes.
-    let acks: RelayResult[] = out.acks;
-    if (!out.accepted) {
-      // publishAndStore returned a non-accepted result; re-fan to be sure.
-      acks = await fanOut(wrapSigned);
-    }
+    const wrapSigned: SignedEvent = giftWrapEvent(rumor, publisherPriv, recipient);
+    const acks = await fanOut(wrapSigned);
+    await stub.storeGiftWrap(wrapSigned, recipient).catch(() => {});
     wraps.push({ recipient, event_id: wrapSigned.id, acks });
   }
 
@@ -804,29 +883,146 @@ async function runAudiencePublish(
 
 // ─── GET /v0/audience/:slug/inbox ───────────────────────────────────────────
 //
-// Stub: this v0.5 milestone hands the wire-format and auth scaffolding;
-// the actual external relay subscription needed to pull #p:[user_pub]
-// gift-wraps lives outside the request lifetime. The route accepts the
-// auth handshake and returns 501 until the subscription is wired in.
-// See PLAN-v0.5 §6 Q4 — capability-based decryption is per-request only.
+// Capability-based decryption per v0.5-design.md §2.5 / PLAN-v0.5 §6 Q4.
+// The flow runs entirely inside the per-request KMS-derivation window:
+//
+//   1. Authenticate the caller (JWT bearer); derive their identity priv via
+//      KMS. The priv lives only on this request's stack — never persisted,
+//      never logged.
+//   2. Pull cached gift-wraps addressed to the caller from the relay-pool
+//      DO. (Cross-instance gift-wraps from external relays will require a
+//      subscription extension; tracked as a t15 follow-up. Same-instance
+//      publish→read works today.)
+//   3. For each gift-wrap, NIP-17 unwrap with the caller's priv. Discard
+//      anything that fails to unwrap (not addressed to us / tampered).
+//   4. Filter rumors to the requested audience slug (matching the rumor's
+//      `a` tag against the caller's audience_address path param).
+//   5. For each rumor, look up the matching kind:30521 grant addressed to
+//      the caller for the rumor's (audience, epoch). Decrypt to get the
+//      epoch private key.
+//   6. NIP-44-decrypt the rumor's `content` (encrypted-variant ciphertext)
+//      using the publisher's pubkey + the epoch priv. Parse JSON-LD.
+//   7. Discard all key material at end of request — the GC reclaims the
+//      stack and `caller_priv.fill(0)` zeroes the priv buffer explicitly.
 
-async function runInboxStub(
-  audienceAddressArg: string,
-  _since: number | undefined,
-  _limit: number | undefined,
-  _claims: AuthClaims,
-  _env: AudienceEnv,
+interface InboxItem {
+  event_id: string;
+  kind: number;
+  audience_slug: string;
+  epoch: number;
+  publisher_pubkey: string;
+  created_at: number;
+  payload: unknown;
+  d_tag: string | undefined;
+}
+
+async function runInbox(
+  slugFromPath: string,
+  since: number | undefined,
+  limit: number,
+  claims: AuthClaims,
+  env: AudienceEnv,
 ): Promise<Response> {
-  return jsonResponse(
-    {
-      ok: false,
-      reason: "audience_inbox_not_yet_implemented",
-      hint:
-        "Local clients can read by subscribing to kinds:[1059], #p:[user_pub] directly; the gateway-delegated inbox endpoint requires the per-request KMS-derivation window to be wired with an external relay subscription. Tracked under t15 follow-up.",
-      audience_address: audienceAddressArg,
-    },
-    501,
-  );
+  const identity = { provider: claims.provider, oauth_id: claims.oauth_id };
+  const { secretKey: callerPriv, publicKey: callerPub } = await deriveNostrKey(identity, env);
+
+  try {
+    const id = env.RELAY_POOL.idFromName("main");
+    const stub = env.RELAY_POOL.get(id);
+    const wraps = await stub.listGiftWraps(callerPub, since, limit * 4);
+
+    // Walk wraps, attempt unwrap. Failures are silently dropped — gift-wraps
+    // for other recipients land here too if a future shared-pool config
+    // exists; either way unwrap fails for those.
+    const items: InboxItem[] = [];
+    for (const w of wraps) {
+      let unwrapped;
+      try {
+        unwrapped = giftUnwrap(w, callerPriv);
+      } catch {
+        continue;
+      }
+      const rumor = unwrapped.rumor;
+      // Filter by audience slug from the path.
+      const aTag = rumor.tags.find((t) => t[0] === "a")?.[1];
+      if (!aTag) continue;
+      const parsedAddr = parseAudienceAddress(aTag);
+      if (!parsedAddr || parsedAddr.slug !== slugFromPath) continue;
+
+      const fa_epoch = Number(rumor.tags.find((t) => t[0] === "fa:epoch")?.[1] ?? NaN);
+      if (!Number.isSafeInteger(fa_epoch)) continue;
+
+      // Find the matching kind:30521 key-grant addressed to us for this audience+epoch.
+      const grantD = `${parsedAddr.slug}:${fa_epoch}:${callerPub}`;
+      // The grant could be signed by aud_id (founding) or any current member.
+      // Try aud_id first, then walk the declaration's member list.
+      let grantEvent: NostrEvent | null = await stub.getObject(30521, parsedAddr.pubkey, grantD);
+      if (!grantEvent) {
+        // Fall back: scan members of the current declaration as potential granters.
+        const decl = await stub.getObject(30520, parsedAddr.pubkey, parsedAddr.slug);
+        if (decl) {
+          const members = decl.tags.filter((t) => t[0] === "p").map((t) => t[1]!);
+          for (const m of members) {
+            const candidate = await stub.getObject(30521, m, grantD);
+            if (candidate) {
+              grantEvent = candidate;
+              break;
+            }
+          }
+        }
+      }
+      if (!grantEvent) continue;
+
+      let epochPrivBytes: Uint8Array;
+      try {
+        epochPrivBytes = nip44Decrypt(grantEvent.content, callerPriv, grantEvent.pubkey);
+      } catch {
+        continue;
+      }
+      if (epochPrivBytes.length !== 32) continue;
+
+      let plaintext: string;
+      try {
+        plaintext = nip44DecryptString(rumor.content, epochPrivBytes, unwrapped.publisherPub);
+      } catch {
+        // Defensive zero-fill the leaked epoch priv on this branch too.
+        epochPrivBytes.fill(0);
+        continue;
+      }
+      let parsedPayload: unknown = plaintext;
+      try {
+        parsedPayload = JSON.parse(plaintext);
+      } catch {
+        // payload wasn't JSON — leave as string.
+      }
+      epochPrivBytes.fill(0);
+
+      const dTag = rumor.tags.find((t) => t[0] === "d")?.[1];
+      items.push({
+        event_id: rumor.id,
+        kind: rumor.kind,
+        audience_slug: parsedAddr.slug,
+        epoch: fa_epoch,
+        publisher_pubkey: unwrapped.publisherPub,
+        created_at: rumor.created_at,
+        payload: parsedPayload,
+        d_tag: dTag,
+      });
+      if (items.length >= limit) break;
+    }
+    items.sort((a, b) => a.created_at - b.created_at);
+
+    return jsonResponse({
+      ok: true,
+      audience_slug: slugFromPath,
+      reader_pubkey: callerPub,
+      since: since ?? null,
+      limit,
+      items,
+    });
+  } finally {
+    callerPriv.fill(0);
+  }
 }
 
 // ─── router ─────────────────────────────────────────────────────────────────
@@ -853,13 +1049,9 @@ export async function handleAudienceRequest(
     const slug = inboxMatch[1]!;
     const since = url.searchParams.get("since");
     const limit = url.searchParams.get("limit");
-    return runInboxStub(
-      slug,
-      since ? Number(since) : undefined,
-      limit ? Number(limit) : undefined,
-      claims,
-      env,
-    );
+    const sinceParsed = since ? Number(since) : undefined;
+    const limitParsed = limit ? Math.min(Math.max(Number(limit) || 50, 1), 200) : 50;
+    return runInbox(slug, sinceParsed, limitParsed, claims, env);
   }
 
   if (request.method !== "POST") {
@@ -901,6 +1093,9 @@ export async function handleAudienceRequest(
     }
     if (path === "/v0/audience/rotate") {
       return await runRotate(validateRotateBody(raw), claims, env);
+    }
+    if (path === "/v0/audience/process-claims") {
+      return await runProcessClaims(validateProcessClaimsBody(raw), claims, env);
     }
     if (path === "/v0/audience/publish") {
       return await runAudiencePublish(validateAudiencePublishBody(raw), claims, env);
