@@ -21,6 +21,9 @@
     "Activity": "prov:Activity",
     "Score": "fa:Score",
     "Comment": "fa:Comment",
+    "Audience": "fa:Audience",
+    "KeyGrant": "fa:KeyGrant",
+    "AudienceClaim": "fa:AudienceClaim",
 
     "agent": { "@id": "schema:agent", "@type": "@id" },
     "author": { "@id": "schema:author", "@type": "@id" },
@@ -71,6 +74,11 @@
     "intent": "fa:intent",
     "tier": "fa:tier",
     "preamble": "fa:preamble",
-    "target": { "@id": "fa:target", "@type": "@id" }
+    "target": { "@id": "fa:target", "@type": "@id" },
+
+    "epoch": { "@id": "fa:epoch", "@type": "xsd:integer" },
+    "audience": "fa:audience",
+    "claimPubkey": "fa:claimPubkey",
+    "note": "fa:note"
   }
 }
