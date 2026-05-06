@@ -1,0 +1,56 @@
+{
+  "@context": {
+    "@version": 1.1,
+    "@protected": true,
+
+    "schema": "https://schema.org/",
+    "fa": "https://4a4.ai/ns/v0#",
+    "studio": "https://sonata.4a4.ai/ns/studio-v0#",
+    "xsd": "http://www.w3.org/2001/XMLSchema#",
+
+    "Card": "studio:Card",
+    "Track": "studio:Track",
+    "DispatchIntent": "studio:DispatchIntent",
+    "Comment": "studio:Comment",
+    "Question": "studio:Question",
+    "Answer": "studio:Answer",
+    "Room": "studio:Room",
+
+    "createdBy": { "@id": "studio:createdBy", "@type": "@id" },
+    "createdAt": { "@id": "studio:createdAt", "@type": "xsd:long" },
+
+    "kind": "studio:cardKind",
+    "track": "studio:trackRef",
+    "title": "schema:name",
+    "summary": "studio:summary",
+    "description": "schema:description",
+    "tags": { "@id": "studio:tags", "@container": "@set" },
+    "relatedTo": { "@id": "studio:relatedTo", "@type": "@id", "@container": "@set" },
+
+    "blocks": { "@id": "studio:blocks", "@container": "@list" },
+    "type": "studio:blockType",
+    "body": "fa:body",
+    "language": "schema:programmingLanguage",
+    "href": { "@id": "studio:href", "@type": "@id" },
+    "label": "studio:label",
+    "key": "studio:key",
+    "value": "schema:value",
+
+    "name": "schema:name",
+    "layout": "studio:layout",
+    "closedAt": { "@id": "studio:closedAt", "@type": "xsd:long" },
+
+    "eventId": "studio:eventId",
+    "candidates": { "@id": "studio:candidates", "@container": "@list" },
+    "chosen": "studio:chosen",
+    "reason": "studio:reason",
+    "signals": "studio:signals",
+
+    "target": { "@id": "fa:target", "@type": "@id" },
+    "intent": "fa:intent",
+
+    "slug": "studio:slug",
+    "project": "studio:project",
+    "defaultTracks": { "@id": "studio:defaultTracks", "@container": "@list" }
+  }
+}
