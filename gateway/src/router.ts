@@ -19,6 +19,7 @@ import {
   handleAuthRequest,
   protectedResourceMetadata,
 } from "./auth";
+import { handleAudienceRequest } from "./audience";
 import { handleCommentRequest } from "./comment";
 import { handleMcpRequest } from "./mcp";
 import type { McpHub } from "./mcp";
@@ -77,6 +78,9 @@ export default {
       }
       if (url.pathname === "/v0/comment") {
         return handleCommentRequest(request, env);
+      }
+      if (url.pathname.startsWith("/v0/audience/")) {
+        return handleAudienceRequest(request, env);
       }
       return handleApiRequest(request, env);
     }

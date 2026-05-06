@@ -1,0 +1,940 @@
+// 4A v0.5 audience-management routes.
+//
+// Six routes under api.4a4.ai/v0/audience/*:
+//
+//   POST /v0/audience/create   — generate aud_id + aud_epoch_1, publish
+//                                kind:30520 + founding kind:30521.
+//   POST /v0/audience/invite   — generate (invite_priv, invite_pub),
+//                                republish 30520 with new fa:pending,
+//                                return 4a:// + claim.4a4.ai URLs.
+//   POST /v0/audience/grant    — direct kind:30521 grant to a known pubkey
+//                                + republish declaration with the new member.
+//   POST /v0/audience/claim    — sign + publish kind:30522 with invite_priv
+//                                (called by the claim page).
+//   POST /v0/audience/rotate   — generate aud_epoch_(n+1), republish 30520
+//                                with new roster, issue grants to all members.
+//   POST /v0/audience/publish  — encrypt payload to aud_epoch_n_pub, build
+//                                kind:30510-30514 rumor, NIP-17 gift-wrap to
+//                                each current member, publish all wraps.
+//   GET  /v0/audience/:slug/inbox — capability-based decryption for
+//                                custodial users (see §2.5).
+//
+// The audience identity priv (`aud_id_priv`) and current epoch priv are
+// returned to the caller on /create and accepted as inputs on subsequent
+// state-mutating routes. Per PLAN-v0.5 §6 Q1 default, the gateway does NOT
+// persist these; the caller (or their local client) is responsible for
+// storing them. A future revision may add `?delegate=true` to opt into
+// gateway-side custody.
+
+import { nip19 } from "nostr-tools";
+import { hexToBytes, bytesToHex, randomBytes } from "@noble/hashes/utils.js";
+import { schnorr } from "@noble/curves/secp256k1.js";
+import { verifyJwt, type AuthClaims, type AuthEnv } from "./auth";
+import {
+  deriveNostrKey,
+  type EventTemplate,
+  type KmsEnv,
+  type SignedEvent,
+} from "./kms";
+import {
+  buildAudienceClaim,
+  buildAudienceDeclaration,
+  buildEncryptedVariant,
+  buildKeyGrant,
+  audienceAddress,
+  parseAudienceAddress,
+  ENCRYPTED_VARIANT_KINDS,
+  type EncryptedVariantKind,
+} from "./lib/audience-events";
+import {
+  encrypt as nip44Encrypt,
+  encryptString as nip44EncryptString,
+  decrypt as nip44Decrypt,
+  decryptString as nip44DecryptString,
+} from "./lib/nip44";
+import { wrap as giftWrapEvent, unwrap as giftUnwrap } from "./lib/nip17";
+import {
+  encodeInviteKey,
+  decodeInviteKey,
+} from "./lib/invite-key";
+import {
+  generateAudienceIdentity,
+  generateEpochKeypair,
+  pubkeyFromPriv,
+} from "./lib/audience-keys";
+import { signEventWithRawKey } from "./lib/sign";
+import {
+  parseAudienceDeclaration,
+  validateAudienceEvent,
+  type AudienceDeclaration,
+  type AudienceLookup,
+} from "./audience-validator";
+import { validateKeyGrantEvent } from "./keygrant-validator";
+import { validateAudienceClaimEvent } from "./audience-claim-validator";
+import { validateEncryptedVariantEvent } from "./encrypted-variant-validator";
+import { validateGiftWrapEvent } from "./gift-wrap-validator";
+import type { NostrEvent, RelayPool } from "./relay-pool";
+import { fanOut, rateLimitCheck, type RelayResult } from "./publish";
+
+export type AudienceEnv = AuthEnv & KmsEnv & {
+  RELAY_POOL: DurableObjectNamespace<RelayPool>;
+};
+
+const HEX64 = /^[0-9a-f]{64}$/i;
+const SLUG = /^[A-Za-z0-9-]+$/;
+const DEFAULT_INVITE_TTL_SEC = 7 * 24 * 60 * 60;
+const HTTPS_CLAIM_BASE = "https://claim.4a4.ai";
+
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Max-Age": "86400",
+};
+
+const JSON_HEADERS: Record<string, string> = {
+  ...CORS_HEADERS,
+  "Content-Type": "application/json; charset=utf-8",
+  "Cache-Control": "no-store",
+};
+
+class AudienceValidationError extends Error {}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
+}
+
+function jsonError(
+  code: string,
+  message: string,
+  status: number,
+  extra?: Record<string, unknown>,
+): Response {
+  return jsonResponse({ error: code, message, ...(extra ?? {}) }, status);
+}
+
+function nowSec(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
+function requireString(raw: unknown, field: string): string {
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new AudienceValidationError(`${field} must be a non-empty string`);
+  }
+  return raw;
+}
+
+function requireSlug(raw: unknown, field: string): string {
+  const s = requireString(raw, field);
+  if (!SLUG.test(s)) {
+    throw new AudienceValidationError(`${field} must match /^[A-Za-z0-9-]+$/`);
+  }
+  return s;
+}
+
+function requireHex64(raw: unknown, field: string): string {
+  const s = requireString(raw, field);
+  if (!HEX64.test(s)) {
+    throw new AudienceValidationError(`${field} must be 32-byte hex`);
+  }
+  return s.toLowerCase();
+}
+
+function requireHex64Bytes(raw: unknown, field: string): Uint8Array {
+  return hexToBytes(requireHex64(raw, field));
+}
+
+function requireAddress(raw: unknown, field: string): { audIdPub: string; slug: string } {
+  const s = requireString(raw, field);
+  const parsed = parseAudienceAddress(s);
+  if (!parsed) {
+    throw new AudienceValidationError(`${field} must be 30520:<aud_id-hex>:<slug>`);
+  }
+  return { audIdPub: parsed.pubkey, slug: parsed.slug };
+}
+
+async function parseJsonBody(request: Request): Promise<Record<string, unknown>> {
+  let raw: unknown;
+  try {
+    raw = await request.json();
+  } catch {
+    throw new AudienceValidationError("request body must be valid JSON");
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new AudienceValidationError("request body must be a JSON object");
+  }
+  return raw as Record<string, unknown>;
+}
+
+async function authenticate(
+  request: Request,
+  env: AudienceEnv,
+): Promise<AuthClaims | Response> {
+  const auth = request.headers.get("Authorization");
+  if (!auth || !auth.startsWith("Bearer ")) {
+    return jsonError("unauthorized", "missing Authorization: Bearer <jwt>", 401);
+  }
+  const claims = await verifyJwt(auth.slice("Bearer ".length).trim(), env);
+  if (!claims) return jsonError("unauthorized", "invalid or expired token", 401);
+  return claims;
+}
+
+interface PublishOutcome {
+  signed: SignedEvent;
+  acks: RelayResult[];
+  accepted: boolean;
+}
+
+async function publishAndStore(
+  signed: SignedEvent,
+  env: AudienceEnv,
+): Promise<PublishOutcome> {
+  const acks = await fanOut(signed);
+  const accepted = acks.some((r) => r.status === "accepted");
+  if (accepted) {
+    try {
+      const id = env.RELAY_POOL.idFromName("main");
+      const stub = env.RELAY_POOL.get(id);
+      // Cache the just-published event so subsequent route calls in the same
+      // request lifetime can read the latest declaration without a relay
+      // round-trip. Best-effort — DO storage failures don't block the wire
+      // having gone out.
+      await stub.storeAudienceEvent(signed).catch(() => {});
+    } catch {
+      // ignore — cache miss just means the next /grant or /rotate will read
+      // from relays via a query rather than from the DO cache.
+    }
+  }
+  return { signed, acks, accepted };
+}
+
+async function lookupDeclarationByAddress(
+  audIdPub: string,
+  slug: string,
+  env: AudienceEnv,
+): Promise<{ event: NostrEvent; decl: AudienceDeclaration } | null> {
+  const id = env.RELAY_POOL.idFromName("main");
+  const stub = env.RELAY_POOL.get(id);
+  const event = await stub.getObject(30520, audIdPub, slug);
+  if (!event) return null;
+  const parsed = parseAudienceDeclaration(event);
+  if (!parsed.ok) return null;
+  return { event, decl: parsed.value };
+}
+
+async function buildLookup(
+  audIdPub: string,
+  slug: string,
+  env: AudienceEnv,
+): Promise<AudienceLookup> {
+  const cached = await lookupDeclarationByAddress(audIdPub, slug, env);
+  return {
+    currentDeclarationByAddress: (addr) => {
+      if (!cached) return undefined;
+      const expected = audienceAddress(audIdPub, slug);
+      if (addr.toLowerCase() !== expected.toLowerCase()) return undefined;
+      return cached.decl;
+    },
+  };
+}
+
+// ─── /v0/audience/create ────────────────────────────────────────────────────
+
+interface CreateBody {
+  slug: string;
+  name: string;
+  description?: string;
+}
+
+function validateCreateBody(raw: Record<string, unknown>): CreateBody {
+  const slug = requireSlug(raw.slug, "slug");
+  const name = requireString(raw.name, "name");
+  const description =
+    raw.description === undefined ? undefined : requireString(raw.description, "description");
+  return { slug, name, description };
+}
+
+async function runCreate(
+  body: CreateBody,
+  claims: AuthClaims,
+  env: AudienceEnv,
+): Promise<Response> {
+  const identity = { provider: claims.provider, oauth_id: claims.oauth_id };
+  const { secretKey: callerPriv, publicKey: callerPub } = await deriveNostrKey(identity, env);
+
+  // 1. Generate audience identity + first epoch keypair.
+  const audId = generateAudienceIdentity();
+  const epoch1 = generateEpochKeypair();
+
+  // 2. Build + sign the kind:30520 declaration (signed by aud_id, founder is
+  //    the caller — caller_pub is the sole initial member).
+  const declTpl = buildAudienceDeclaration({
+    audIdPub: audId.pub,
+    slug: body.slug,
+    name: body.name,
+    description: body.description,
+    epoch: 1,
+    epochPub: epoch1.pub,
+    members: [callerPub],
+  });
+  const declSigned = signEventWithRawKey(declTpl, audId.priv);
+  const declCheck = validateAudienceEvent(declSigned);
+  if (!declCheck.ok) {
+    return jsonError("internal_error", `built invalid declaration: ${declCheck.error}`, 500);
+  }
+
+  // 3. Build + sign the founding kind:30521 (signed by aud_id; recipient is
+  //    the caller; content = NIP-44(epoch1_priv, aud_id_priv → caller_pub)).
+  const ciphertext = nip44Encrypt(epoch1.priv, audId.priv, callerPub);
+  const grantTpl = buildKeyGrant({
+    audIdPub: audId.pub,
+    slug: body.slug,
+    epoch: 1,
+    recipientPub: callerPub,
+    ciphertext,
+  });
+  const grantSigned = signEventWithRawKey(grantTpl, audId.priv);
+
+  // 4. Publish both events.
+  const declOut = await publishAndStore(declSigned, env);
+  if (!declOut.accepted) {
+    return jsonError("relay_failure", "no relays accepted the audience declaration", 502, {
+      relay_acks: declOut.acks,
+    });
+  }
+  const grantOut = await publishAndStore(grantSigned, env);
+
+  callerPriv.fill(0);
+
+  return jsonResponse({
+    ok: true,
+    audience_address: audienceAddress(audId.pub, body.slug),
+    aud_id_pub: audId.pub,
+    aud_id_priv: bytesToHex(audId.priv),
+    epoch: 1,
+    aud_epoch_pub: epoch1.pub,
+    aud_epoch_priv: bytesToHex(epoch1.priv),
+    declaration_event_id: declSigned.id,
+    founding_grant_event_id: grantSigned.id,
+    founder_pubkey: callerPub,
+    founder_npub: nip19.npubEncode(callerPub),
+    relay_acks: { declaration: declOut.acks, founding_grant: grantOut.acks },
+  });
+}
+
+// ─── /v0/audience/invite ────────────────────────────────────────────────────
+
+interface InviteBody {
+  audience_address: string;
+  aud_id_priv: Uint8Array;
+  ttl_seconds: number;
+}
+
+function validateInviteBody(raw: Record<string, unknown>): InviteBody {
+  // We only return the parsed shape; the audience_address is re-parsed by
+  // requireAddress below, which already throws AudienceValidationError on
+  // malformed input.
+  const audience_address = requireString(raw.audience_address, "audience_address");
+  const aud_id_priv = requireHex64Bytes(raw.aud_id_priv, "aud_id_priv");
+  let ttl = DEFAULT_INVITE_TTL_SEC;
+  if (raw.ttl_seconds !== undefined) {
+    if (typeof raw.ttl_seconds !== "number" || raw.ttl_seconds <= 0) {
+      throw new AudienceValidationError("ttl_seconds must be a positive number");
+    }
+    ttl = Math.floor(raw.ttl_seconds);
+  }
+  return { audience_address, aud_id_priv, ttl_seconds: ttl };
+}
+
+async function runInvite(body: InviteBody, env: AudienceEnv): Promise<Response> {
+  const { audIdPub, slug } = requireAddress(body.audience_address, "audience_address");
+  // Verify aud_id_priv matches audIdPub (callers must hold the audience
+  // identity priv to invite — protects against forged declarations).
+  if (pubkeyFromPriv(body.aud_id_priv) !== audIdPub) {
+    return jsonError("unauthorized", "aud_id_priv does not match audience_address", 401);
+  }
+
+  const cached = await lookupDeclarationByAddress(audIdPub, slug, env);
+  if (!cached) {
+    return jsonError("not_found", "audience declaration not found in relay cache", 404);
+  }
+
+  // Generate the invite keypair.
+  const invitePriv = randomBytes(32);
+  const invitePub = bytesToHex(schnorr.getPublicKey(invitePriv));
+  const expirationUnix = nowSec() + body.ttl_seconds;
+
+  // Re-publish kind:30520 with the new fa:pending tag.
+  const newPending = [...cached.decl.pending, { invitePub, expirationUnix }];
+  const declTpl = buildAudienceDeclaration({
+    audIdPub: audIdPub,
+    slug,
+    name: extractDeclarationName(cached.event) ?? slug,
+    description: extractDeclarationDescription(cached.event),
+    epoch: cached.decl.epoch,
+    epochPub: cached.decl.epochPub,
+    members: cached.decl.members,
+    pending: newPending,
+  });
+  const declSigned = signEventWithRawKey(declTpl, body.aud_id_priv);
+  const declOut = await publishAndStore(declSigned, env);
+  if (!declOut.accepted) {
+    return jsonError("relay_failure", "no relays accepted the updated declaration", 502, {
+      relay_acks: declOut.acks,
+    });
+  }
+
+  const inviteKey = encodeInviteKey(invitePriv);
+  const fourAUrl = `4a://invite/${slug}/${cached.decl.epoch}?k=${inviteKey}`;
+  const httpsUrl = `${HTTPS_CLAIM_BASE}/invite/${slug}/${cached.decl.epoch}?k=${inviteKey}`;
+
+  return jsonResponse({
+    ok: true,
+    four_a_url: fourAUrl,
+    https_url: httpsUrl,
+    invite_pub: invitePub,
+    invite_priv_4ainv: inviteKey,
+    expires_at: expirationUnix,
+    declaration_event_id: declSigned.id,
+  });
+}
+
+function extractDeclarationName(event: NostrEvent): string | undefined {
+  try {
+    const obj = JSON.parse(event.content) as Record<string, unknown>;
+    return typeof obj.name === "string" ? obj.name : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function extractDeclarationDescription(event: NostrEvent): string | undefined {
+  try {
+    const obj = JSON.parse(event.content) as Record<string, unknown>;
+    return typeof obj.description === "string" ? obj.description : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// ─── /v0/audience/grant ─────────────────────────────────────────────────────
+
+interface GrantBody {
+  audience_address: string;
+  aud_id_priv: Uint8Array;
+  aud_epoch_priv: Uint8Array;
+  recipient_pubkey: string;
+}
+
+function validateGrantBody(raw: Record<string, unknown>): GrantBody {
+  return {
+    audience_address: requireString(raw.audience_address, "audience_address"),
+    aud_id_priv: requireHex64Bytes(raw.aud_id_priv, "aud_id_priv"),
+    aud_epoch_priv: requireHex64Bytes(raw.aud_epoch_priv, "aud_epoch_priv"),
+    recipient_pubkey: requireHex64(raw.recipient_pubkey, "recipient_pubkey"),
+  };
+}
+
+async function runGrant(
+  body: GrantBody,
+  claims: AuthClaims,
+  env: AudienceEnv,
+): Promise<Response> {
+  const { audIdPub, slug } = requireAddress(body.audience_address, "audience_address");
+  if (pubkeyFromPriv(body.aud_id_priv) !== audIdPub) {
+    return jsonError("unauthorized", "aud_id_priv does not match audience_address", 401);
+  }
+  const cached = await lookupDeclarationByAddress(audIdPub, slug, env);
+  if (!cached) {
+    return jsonError("not_found", "audience declaration not found in relay cache", 404);
+  }
+  // The granter signs with their identity key; verify that pubkeyFromPriv of
+  // aud_epoch_priv matches the epoch the declaration is currently on.
+  if (pubkeyFromPriv(body.aud_epoch_priv) !== cached.decl.epochPub) {
+    return jsonError(
+      "bad_request",
+      "aud_epoch_priv does not match the current declaration's fa:epoch-pubkey",
+      400,
+    );
+  }
+
+  // Caller's identity = granter pubkey from KMS derivation.
+  const identity = { provider: claims.provider, oauth_id: claims.oauth_id };
+  const { secretKey: granterPriv, publicKey: granterPub } = await deriveNostrKey(identity, env);
+
+  // 1. Build + sign the kind:30521 grant from granter → recipient.
+  const ciphertext = nip44Encrypt(body.aud_epoch_priv, granterPriv, body.recipient_pubkey);
+  const grantTpl = buildKeyGrant({
+    audIdPub,
+    slug,
+    epoch: cached.decl.epoch,
+    recipientPub: body.recipient_pubkey,
+    ciphertext,
+  });
+  const grantSigned = signEventWithRawKey(grantTpl, granterPriv);
+
+  // 2. Re-publish declaration with new member added (no rotation per Q2 default).
+  const isAlreadyMember = cached.decl.members.some(
+    (m) => m.toLowerCase() === body.recipient_pubkey.toLowerCase(),
+  );
+  let declSigned: SignedEvent | undefined;
+  if (!isAlreadyMember) {
+    const newMembers = [...cached.decl.members, body.recipient_pubkey];
+    const declTpl = buildAudienceDeclaration({
+      audIdPub,
+      slug,
+      name: extractDeclarationName(cached.event) ?? slug,
+      description: extractDeclarationDescription(cached.event),
+      epoch: cached.decl.epoch,
+      epochPub: cached.decl.epochPub,
+      members: newMembers,
+      pending: cached.decl.pending,
+    });
+    declSigned = signEventWithRawKey(declTpl, body.aud_id_priv);
+  }
+
+  // Publish.
+  const grantOut = await publishAndStore(grantSigned, env);
+  let declOut: PublishOutcome | undefined;
+  if (declSigned) {
+    declOut = await publishAndStore(declSigned, env);
+  }
+  granterPriv.fill(0);
+
+  return jsonResponse({
+    ok: true,
+    grant_event_id: grantSigned.id,
+    declaration_event_id: declSigned?.id ?? cached.event.id,
+    granter_pubkey: granterPub,
+    recipient_pubkey: body.recipient_pubkey,
+    relay_acks: { grant: grantOut.acks, declaration: declOut?.acks ?? [] },
+  });
+}
+
+// ─── /v0/audience/claim ─────────────────────────────────────────────────────
+
+interface ClaimBody {
+  audience_address: string;
+  epoch: number;
+  invite_priv_4ainv: string;
+  claim_pubkey: string;
+  inviter_pubkey: string;
+  note?: string;
+}
+
+function validateClaimBody(raw: Record<string, unknown>): ClaimBody {
+  const epoch = raw.epoch;
+  if (typeof epoch !== "number" || !Number.isSafeInteger(epoch) || epoch < 1) {
+    throw new AudienceValidationError("epoch must be a positive integer");
+  }
+  return {
+    audience_address: requireString(raw.audience_address, "audience_address"),
+    epoch,
+    invite_priv_4ainv: requireString(raw.invite_priv_4ainv, "invite_priv_4ainv"),
+    claim_pubkey: requireHex64(raw.claim_pubkey, "claim_pubkey"),
+    inviter_pubkey: requireHex64(raw.inviter_pubkey, "inviter_pubkey"),
+    note:
+      raw.note === undefined ? undefined : requireString(raw.note, "note"),
+  };
+}
+
+async function runClaim(body: ClaimBody, env: AudienceEnv): Promise<Response> {
+  const { audIdPub, slug } = requireAddress(body.audience_address, "audience_address");
+  const decoded = decodeInviteKey(body.invite_priv_4ainv);
+  if (!decoded.ok) {
+    return jsonError("bad_request", `invalid invite_priv_4ainv: ${decoded.error.kind}`, 400);
+  }
+  const invitePriv = decoded.priv;
+  const invitePub = pubkeyFromPriv(invitePriv);
+
+  const claimTpl = buildAudienceClaim({
+    audIdPub,
+    slug,
+    epoch: body.epoch,
+    invitePub,
+    inviterPub: body.inviter_pubkey,
+    claimPub: body.claim_pubkey,
+    note: body.note,
+    expiration: nowSec() + DEFAULT_INVITE_TTL_SEC,
+  });
+  const claimSigned = signEventWithRawKey(claimTpl, invitePriv);
+  const out = await publishAndStore(claimSigned, env);
+  if (!out.accepted) {
+    return jsonError("relay_failure", "no relays accepted the claim event", 502, {
+      relay_acks: out.acks,
+    });
+  }
+
+  return jsonResponse({
+    ok: true,
+    claim_event_id: claimSigned.id,
+    invite_pubkey: invitePub,
+    claim_pubkey: body.claim_pubkey,
+    relay_acks: out.acks,
+  });
+}
+
+// ─── /v0/audience/rotate ────────────────────────────────────────────────────
+
+interface RotateBody {
+  audience_address: string;
+  aud_id_priv: Uint8Array;
+  add_members: string[];
+  remove_members: string[];
+  remove_pending: string[];
+}
+
+function validateRotateBody(raw: Record<string, unknown>): RotateBody {
+  return {
+    audience_address: requireString(raw.audience_address, "audience_address"),
+    aud_id_priv: requireHex64Bytes(raw.aud_id_priv, "aud_id_priv"),
+    add_members: arrayOfHex64(raw.add_members, "add_members"),
+    remove_members: arrayOfHex64(raw.remove_members, "remove_members"),
+    remove_pending: arrayOfHex64(raw.remove_pending, "remove_pending"),
+  };
+}
+
+function arrayOfHex64(raw: unknown, field: string): string[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) {
+    throw new AudienceValidationError(`${field} must be an array`);
+  }
+  return raw.map((v, i) => requireHex64(v, `${field}[${i}]`));
+}
+
+async function runRotate(
+  body: RotateBody,
+  claims: AuthClaims,
+  env: AudienceEnv,
+): Promise<Response> {
+  const { audIdPub, slug } = requireAddress(body.audience_address, "audience_address");
+  if (pubkeyFromPriv(body.aud_id_priv) !== audIdPub) {
+    return jsonError("unauthorized", "aud_id_priv does not match audience_address", 401);
+  }
+  const cached = await lookupDeclarationByAddress(audIdPub, slug, env);
+  if (!cached) {
+    return jsonError("not_found", "audience declaration not found in relay cache", 404);
+  }
+
+  // Compute the post-rotation member set.
+  const removeSet = new Set(body.remove_members.map((m) => m.toLowerCase()));
+  const newMembers = cached.decl.members.filter((m) => !removeSet.has(m.toLowerCase()));
+  for (const m of body.add_members) {
+    if (!newMembers.some((x) => x.toLowerCase() === m.toLowerCase())) {
+      newMembers.push(m);
+    }
+  }
+  // Compute remaining pending invites.
+  const removePendingSet = new Set(body.remove_pending.map((m) => m.toLowerCase()));
+  const newPending = cached.decl.pending.filter(
+    (p) => !removePendingSet.has(p.invitePub.toLowerCase()),
+  );
+
+  // Generate new epoch.
+  const newEpoch = cached.decl.epoch + 1;
+  const epochKp = generateEpochKeypair();
+
+  // Republish declaration.
+  const declTpl = buildAudienceDeclaration({
+    audIdPub,
+    slug,
+    name: extractDeclarationName(cached.event) ?? slug,
+    description: extractDeclarationDescription(cached.event),
+    epoch: newEpoch,
+    epochPub: epochKp.pub,
+    members: newMembers,
+    pending: newPending,
+  });
+  const declSigned = signEventWithRawKey(declTpl, body.aud_id_priv);
+  const declOut = await publishAndStore(declSigned, env);
+  if (!declOut.accepted) {
+    return jsonError("relay_failure", "no relays accepted the rotated declaration", 502, {
+      relay_acks: declOut.acks,
+    });
+  }
+
+  // Issue grants. Granter is the caller (must be a member of the post-rotation
+  // audience). If the caller isn't a member, fall back to signing grants with
+  // aud_id (founding-grant pattern) so a rotation-after-removal still works.
+  const identity = { provider: claims.provider, oauth_id: claims.oauth_id };
+  const { secretKey: granterPriv, publicKey: granterPub } = await deriveNostrKey(identity, env);
+  const granterIsMember = newMembers.some((m) => m.toLowerCase() === granterPub.toLowerCase());
+  const grantSigningPriv = granterIsMember ? granterPriv : body.aud_id_priv;
+
+  const grantOuts: { recipient: string; event_id: string; acks: RelayResult[] }[] = [];
+  for (const recipient of newMembers) {
+    const ciphertext = nip44Encrypt(epochKp.priv, grantSigningPriv, recipient);
+    const grantTpl = buildKeyGrant({
+      audIdPub,
+      slug,
+      epoch: newEpoch,
+      recipientPub: recipient,
+      ciphertext,
+    });
+    const grantSigned = signEventWithRawKey(grantTpl, grantSigningPriv);
+    const out = await publishAndStore(grantSigned, env);
+    grantOuts.push({ recipient, event_id: grantSigned.id, acks: out.acks });
+  }
+
+  granterPriv.fill(0);
+
+  return jsonResponse({
+    ok: true,
+    epoch: newEpoch,
+    aud_epoch_pub: epochKp.pub,
+    aud_epoch_priv: bytesToHex(epochKp.priv),
+    declaration_event_id: declSigned.id,
+    grants: grantOuts,
+    members: newMembers,
+    pending: newPending,
+  });
+}
+
+// ─── /v0/audience/publish ───────────────────────────────────────────────────
+
+interface AudiencePublishBody {
+  audience_address: string;
+  aud_epoch_pub: string;
+  kind: EncryptedVariantKind;
+  payload: unknown;
+  d_tag: string;
+  alt: string;
+}
+
+function validateAudiencePublishBody(raw: Record<string, unknown>): AudiencePublishBody {
+  const kind = raw.kind;
+  if (typeof kind !== "number" || !ENCRYPTED_VARIANT_KINDS.includes(kind as EncryptedVariantKind)) {
+    throw new AudienceValidationError(
+      `kind must be one of ${ENCRYPTED_VARIANT_KINDS.join(", ")}`,
+    );
+  }
+  if (raw.payload === undefined || typeof raw.payload !== "object" || raw.payload === null) {
+    throw new AudienceValidationError("payload must be a JSON object");
+  }
+  return {
+    audience_address: requireString(raw.audience_address, "audience_address"),
+    aud_epoch_pub: requireHex64(raw.aud_epoch_pub, "aud_epoch_pub"),
+    kind: kind as EncryptedVariantKind,
+    payload: raw.payload,
+    d_tag: requireString(raw.d_tag, "d_tag"),
+    alt: requireString(raw.alt, "alt"),
+  };
+}
+
+async function runAudiencePublish(
+  body: AudiencePublishBody,
+  claims: AuthClaims,
+  env: AudienceEnv,
+): Promise<Response> {
+  const { audIdPub, slug } = requireAddress(body.audience_address, "audience_address");
+  const cached = await lookupDeclarationByAddress(audIdPub, slug, env);
+  if (!cached) {
+    return jsonError("not_found", "audience declaration not found in relay cache", 404);
+  }
+  if (cached.decl.epochPub !== body.aud_epoch_pub) {
+    return jsonError(
+      "bad_request",
+      "aud_epoch_pub does not match the current declaration's fa:epoch-pubkey",
+      400,
+    );
+  }
+
+  // Caller's identity = publisher.
+  const identity = { provider: claims.provider, oauth_id: claims.oauth_id };
+  const { secretKey: publisherPriv, publicKey: publisherPub } = await deriveNostrKey(
+    identity,
+    env,
+  );
+  if (!cached.decl.members.some((m) => m.toLowerCase() === publisherPub.toLowerCase())) {
+    publisherPriv.fill(0);
+    return jsonError("forbidden", "publisher is not a current member of the audience", 403);
+  }
+
+  // 1. Encrypt the payload to the audience's epoch pubkey.
+  const plaintext = JSON.stringify(body.payload);
+  const ciphertext = nip44EncryptString(plaintext, publisherPriv, cached.decl.epochPub);
+
+  // 2. Build the encrypted-variant rumor.
+  const rumorTpl = buildEncryptedVariant({
+    kind: body.kind,
+    audIdPub,
+    slug,
+    epoch: cached.decl.epoch,
+    members: cached.decl.members,
+    dTag: body.d_tag,
+    alt: body.alt,
+    ciphertext,
+  });
+  const rumor = signEventWithRawKey(rumorTpl, publisherPriv);
+
+  // 3. For each member, gift-wrap the rumor and publish the wrap.
+  const wraps: { recipient: string; event_id: string; acks: RelayResult[] }[] = [];
+  for (const recipient of cached.decl.members) {
+    const wrappedEvent = giftWrapEvent(rumor, publisherPriv, recipient);
+    const wrapSigned: SignedEvent = wrappedEvent;
+    const out = await publishAndStore(wrapSigned, env).catch(async () => ({
+      signed: wrapSigned,
+      acks: await fanOut(wrapSigned),
+      accepted: false,
+    } as PublishOutcome));
+    // storeAudienceEvent rejects 1059 (it's not in AUDIENCE_KINDS); fanOut
+    // happens regardless, that's the load-bearing call. Capture acks via the
+    // catch-fallback so a non-cacheable kind still publishes.
+    let acks: RelayResult[] = out.acks;
+    if (!out.accepted) {
+      // publishAndStore returned a non-accepted result; re-fan to be sure.
+      acks = await fanOut(wrapSigned);
+    }
+    wraps.push({ recipient, event_id: wrapSigned.id, acks });
+  }
+
+  publisherPriv.fill(0);
+
+  return jsonResponse({
+    ok: true,
+    rumor_event_id: rumor.id,
+    rumor_kind: rumor.kind,
+    audience_address: body.audience_address,
+    epoch: cached.decl.epoch,
+    publisher_pubkey: publisherPub,
+    member_count: cached.decl.members.length,
+    gift_wraps: wraps,
+  });
+}
+
+// ─── GET /v0/audience/:slug/inbox ───────────────────────────────────────────
+//
+// Stub: this v0.5 milestone hands the wire-format and auth scaffolding;
+// the actual external relay subscription needed to pull #p:[user_pub]
+// gift-wraps lives outside the request lifetime. The route accepts the
+// auth handshake and returns 501 until the subscription is wired in.
+// See PLAN-v0.5 §6 Q4 — capability-based decryption is per-request only.
+
+async function runInboxStub(
+  audienceAddressArg: string,
+  _since: number | undefined,
+  _limit: number | undefined,
+  _claims: AuthClaims,
+  _env: AudienceEnv,
+): Promise<Response> {
+  return jsonResponse(
+    {
+      ok: false,
+      reason: "audience_inbox_not_yet_implemented",
+      hint:
+        "Local clients can read by subscribing to kinds:[1059], #p:[user_pub] directly; the gateway-delegated inbox endpoint requires the per-request KMS-derivation window to be wired with an external relay subscription. Tracked under t15 follow-up.",
+      audience_address: audienceAddressArg,
+    },
+    501,
+  );
+}
+
+// ─── router ─────────────────────────────────────────────────────────────────
+
+export async function handleAudienceRequest(
+  request: Request,
+  env: AudienceEnv,
+): Promise<Response> {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS_HEADERS });
+  }
+
+  const url = new URL(request.url);
+  const path = url.pathname;
+
+  // /v0/audience/:slug/inbox is a GET path; everything else is POST.
+  const inboxMatch = path.match(/^\/v0\/audience\/([A-Za-z0-9-]+)\/inbox$/);
+  if (inboxMatch) {
+    if (request.method !== "GET") {
+      return jsonError("method_not_allowed", `${request.method} not allowed`, 405);
+    }
+    const claims = await authenticate(request, env);
+    if (claims instanceof Response) return claims;
+    const slug = inboxMatch[1]!;
+    const since = url.searchParams.get("since");
+    const limit = url.searchParams.get("limit");
+    return runInboxStub(
+      slug,
+      since ? Number(since) : undefined,
+      limit ? Number(limit) : undefined,
+      claims,
+      env,
+    );
+  }
+
+  if (request.method !== "POST") {
+    return jsonError("method_not_allowed", `${request.method} not allowed`, 405);
+  }
+
+  const claims = await authenticate(request, env);
+  if (claims instanceof Response) return claims;
+
+  // Per-route rate limit (publish-style endpoints are heavier than score).
+  const rateKey = `${claims.provider}:${claims.oauth_id}`;
+  const rl = rateLimitCheck(rateKey);
+  if (!rl.ok) {
+    return jsonError("rate_limited", "max 60 publishes/hour per identity", 429, {
+      retryAfterMs: rl.retryAfterMs,
+    });
+  }
+
+  let raw: Record<string, unknown>;
+  try {
+    raw = await parseJsonBody(request);
+  } catch (err) {
+    if (err instanceof AudienceValidationError) return jsonError("bad_request", err.message, 400);
+    throw err;
+  }
+
+  try {
+    if (path === "/v0/audience/create") {
+      return await runCreate(validateCreateBody(raw), claims, env);
+    }
+    if (path === "/v0/audience/invite") {
+      return await runInvite(validateInviteBody(raw), env);
+    }
+    if (path === "/v0/audience/grant") {
+      return await runGrant(validateGrantBody(raw), claims, env);
+    }
+    if (path === "/v0/audience/claim") {
+      return await runClaim(validateClaimBody(raw), env);
+    }
+    if (path === "/v0/audience/rotate") {
+      return await runRotate(validateRotateBody(raw), claims, env);
+    }
+    if (path === "/v0/audience/publish") {
+      return await runAudiencePublish(validateAudiencePublishBody(raw), claims, env);
+    }
+    return jsonError("not_found", `no handler for ${path}`, 404);
+  } catch (err) {
+    if (err instanceof AudienceValidationError) {
+      return jsonError("bad_request", err.message, 400);
+    }
+    return jsonError(
+      "internal_error",
+      err instanceof Error ? err.message : "audience request failed",
+      500,
+    );
+  }
+}
+
+// Re-exports for tests + the worked-example fixture builder.
+export {
+  buildAudienceDeclaration,
+  buildKeyGrant,
+  buildAudienceClaim,
+  buildEncryptedVariant,
+  audienceAddress,
+};
+export {
+  giftUnwrap,
+  nip44Decrypt,
+  nip44DecryptString,
+};
+export {
+  validateAudienceEvent,
+  validateKeyGrantEvent,
+  validateAudienceClaimEvent,
+  validateEncryptedVariantEvent,
+  validateGiftWrapEvent,
+};

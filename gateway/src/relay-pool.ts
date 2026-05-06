@@ -38,7 +38,15 @@ export const RELAYS = [
   "wss://nostr.bitcoiner.social",
 ] as const;
 
+// Kinds that the relay pool subscribes to from external relays. v0 public
+// kinds + Phase 3 credibility events. v0.5 encrypted variants (30510-30514),
+// declarations (30520), key-grants (30521), claims (30522) and gift-wraps
+// (1059) are NOT in this list — they're per-recipient or per-audience and
+// would fan out a vast amount of irrelevant traffic on the global subscription.
+// Audience routes call `storeAudienceEvent` directly after a successful publish
+// so the local cache stays consistent without joining the global firehose.
 const KINDS_4A = [30500, 30501, 30502, 30503, 30504, 30506, 30507] as const;
+const AUDIENCE_KINDS = [30510, 30511, 30512, 30513, 30514, 30520, 30521, 30522] as const;
 const SUBSCRIPTION_ID = "4a-pool";
 
 const RECONNECT_BASE_MS = 2_000;
@@ -189,6 +197,44 @@ export class RelayPool extends DurableObject<unknown> {
     const key = `${EVENT_PREFIX}${kind}:${pubkey}:${d}`;
     const event = await this.ctx.storage.get<NostrEvent>(key);
     return event ?? null;
+  }
+
+  /**
+   * Store a v0.5 audience-related event (kind 30510-30514, 30520, 30521,
+   * 30522) directly into local storage after a successful publish. Bypasses
+   * the global subscription firehose so the gateway can cache its own
+   * audience writes without joining a torrent of unrelated traffic.
+   *
+   * Verifies signature + canonical id but does not require a `blake3` tag —
+   * encrypted variants (30510-30514) carry blake3-of-ciphertext, but
+   * declarations / key-grants / claims do not (per SPEC-v0.5 §§1.1, 2.1, 5.2).
+   */
+  async storeAudienceEvent(event: NostrEvent): Promise<{ ok: boolean; reason?: string }> {
+    if (!AUDIENCE_KINDS.includes(event.kind as (typeof AUDIENCE_KINDS)[number])) {
+      return { ok: false, reason: `kind ${event.kind} not in v0.5 audience range` };
+    }
+    if (canonicalEventId(event) !== event.id) {
+      return { ok: false, reason: "id mismatch" };
+    }
+    if (!schnorr.verify(fromHex(event.sig), fromHex(event.id), fromHex(event.pubkey))) {
+      return { ok: false, reason: "signature verification failed" };
+    }
+    const dTag = findTag(event.tags, "d");
+    if (!dTag) return { ok: false, reason: "missing d tag" };
+    // Encrypted variants MUST carry blake3 of ciphertext (SPEC-v0.5 §3.3).
+    if (event.kind >= 30510 && event.kind <= 30514) {
+      const blake3Tag = findTag(event.tags, "blake3");
+      if (!blake3Tag || blake3Tag !== blake3ContentTag(event.content)) {
+        return { ok: false, reason: "blake3 tag missing or mismatched" };
+      }
+    }
+    const key = `${EVENT_PREFIX}${event.kind}:${event.pubkey}:${dTag}`;
+    const existing = await this.ctx.storage.get<NostrEvent>(key);
+    if (existing && existing.created_at >= event.created_at) {
+      return { ok: true, reason: "superseded by existing newer event" };
+    }
+    await this.ctx.storage.put(key, event);
+    return { ok: true };
   }
 
   async listCommons(): Promise<NostrEvent[]> {
