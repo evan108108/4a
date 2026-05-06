@@ -8,3 +8,7 @@ build/
 
 # Local-only scripts (underscore-prefixed); keep KMS smoke tests out of git
 scripts/_*
+
+# bun is not the canonical package manager for this repo (npm + wrangler).
+bun.lock
+bun.lockb

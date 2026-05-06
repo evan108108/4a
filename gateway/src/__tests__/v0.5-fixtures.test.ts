@@ -2,8 +2,12 @@
 // through the validators. This is the regression backstop that catches
 // fixture↔validator drift over time.
 
+// @ts-ignore - node types not installed; vitest runs fine without them
 import { readFileSync } from "node:fs";
+// @ts-ignore - same
 import { resolve } from "node:path";
+// @ts-ignore - same
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { validateAudienceEvent, parseAudienceDeclaration } from "../audience-validator";
 import { validateKeyGrantEvent } from "../keygrant-validator";
@@ -12,7 +16,9 @@ import { validateEncryptedVariantEvent } from "../encrypted-variant-validator";
 import { validateGiftWrapEvent } from "../gift-wrap-validator";
 import type { NostrEvent } from "../relay-pool";
 
-const FIXTURE_DIR = resolve(__dirname, "..", "..", "..", "docs", "examples", "v0.5");
+// @ts-ignore - import.meta typings not loaded by ESNext lib in this tsconfig
+const HERE = fileURLToPath(new URL(".", import.meta.url));
+const FIXTURE_DIR = resolve(HERE, "..", "..", "..", "docs", "examples", "v0.5");
 
 function load(name: string): NostrEvent {
   return JSON.parse(readFileSync(resolve(FIXTURE_DIR, name), "utf8"));
