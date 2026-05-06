@@ -1,0 +1,34 @@
+{
+  "kind": 30521,
+  "created_at": 1777344001,
+  "tags": [
+    [
+      "d",
+      "team-design:1:8a9705c9296b6040aeac085c9cc64a52fe3fafe5801b25ace7e98178be23a104"
+    ],
+    [
+      "fa:context",
+      "https://4a4.ai/ns/v0"
+    ],
+    [
+      "alt",
+      "KeyGrant: team-design epoch 1"
+    ],
+    [
+      "a",
+      "30520:05173fa1ee9541bcbd689cfe3d6268fdd7cc7d55c64309dd533107ca2f9fafcb:team-design"
+    ],
+    [
+      "fa:epoch",
+      "1"
+    ],
+    [
+      "p",
+      "8a9705c9296b6040aeac085c9cc64a52fe3fafe5801b25ace7e98178be23a104"
+    ]
+  ],
+  "content": "ArZBAz48a/kIvE7wL0cjrLYsB+RFyaZpXUI/bJV8+Sbkch3w+3/DBXGjofE/6DkPs1kuPY9eH/iRJ9/SyvTwHCGXaaQy3xckejbZqdtNdAO9NlzVrZkWE5yZ5uTT2gcu7s5m",
+  "id": "94522608a49a85819a6cac9f6ccbd13ff13568be90a099602a3936039ad25678",
+  "pubkey": "05173fa1ee9541bcbd689cfe3d6268fdd7cc7d55c64309dd533107ca2f9fafcb",
+  "sig": "d642452047236954aa18fbc6e121181f44834c3609b155fef7ed1e2c3341da237731acbb4d32784521a221436074cc1c2168169950f0baa87bd61d69c5f31f7d"
+}

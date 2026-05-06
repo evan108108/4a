@@ -1,0 +1,42 @@
+{
+  "kind": 30522,
+  "created_at": 1777344003,
+  "tags": [
+    [
+      "d",
+      "team-design:1:dd5857a114db166131d9553f6f16516ee4892a9e198dfe606f0f273b7d2e92a7"
+    ],
+    [
+      "fa:context",
+      "https://4a4.ai/ns/v0"
+    ],
+    [
+      "alt",
+      "claim audience team-design epoch 1"
+    ],
+    [
+      "a",
+      "30520:05173fa1ee9541bcbd689cfe3d6268fdd7cc7d55c64309dd533107ca2f9fafcb:team-design"
+    ],
+    [
+      "fa:epoch",
+      "1"
+    ],
+    [
+      "p",
+      "8a9705c9296b6040aeac085c9cc64a52fe3fafe5801b25ace7e98178be23a104"
+    ],
+    [
+      "fa:claim-pubkey",
+      "62bac60891ac55c8aeaa5f556e106317eb903e9000452b587d432b9376fefb41"
+    ],
+    [
+      "expiration",
+      "1893456000"
+    ]
+  ],
+  "content": "{\"@context\":\"https://4a4.ai/ns/v0\",\"@type\":\"AudienceClaim\",\"audience\":\"team-design\",\"epoch\":1,\"claimPubkey\":\"62bac60891ac55c8aeaa5f556e106317eb903e9000452b587d432b9376fefb41\",\"note\":\"claimed via claim.4a4.ai\"}",
+  "id": "77ce4aabc7ef50b0ee16e0f5a7fad26e26b49d0ee064f83cf3d894647377185f",
+  "pubkey": "dd5857a114db166131d9553f6f16516ee4892a9e198dfe606f0f273b7d2e92a7",
+  "sig": "b3b3a1f7798d5be22aae536303faa84e60c398ce02f0c1a414488fd962098612c81dcc405d6f09114e57db547979b67fc4fba0b787d7808b2c7d9cc22c5e32c8"
+}

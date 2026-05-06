@@ -1,0 +1,42 @@
+{
+  "kind": 30510,
+  "created_at": 1777344007,
+  "tags": [
+    [
+      "d",
+      "team-design-css-reset"
+    ],
+    [
+      "fa:context",
+      "https://4a4.ai/ns/v0"
+    ],
+    [
+      "alt",
+      "encrypted Observation in team-design"
+    ],
+    [
+      "a",
+      "30520:05173fa1ee9541bcbd689cfe3d6268fdd7cc7d55c64309dd533107ca2f9fafcb:team-design"
+    ],
+    [
+      "fa:epoch",
+      "2"
+    ],
+    [
+      "p",
+      "8a9705c9296b6040aeac085c9cc64a52fe3fafe5801b25ace7e98178be23a104"
+    ],
+    [
+      "p",
+      "62bac60891ac55c8aeaa5f556e106317eb903e9000452b587d432b9376fefb41"
+    ],
+    [
+      "blake3",
+      "bk-jslxjj4idfpmkyigdxoxnpzn6yllc2bxc37pdy7wgeyu5i4bb7ba"
+    ]
+  ],
+  "content": "AmtplIGE21H7kCGAoi9VI4imamPYU/hN4rqYPJfEa6WDXI9hHrt2vbccVNjeYfm8EOQuKKfujsdAhMoePpHbnb3ANjwwwCphATF22FTm9moqin1HG38iUWnYhiYx8M3juDEYYB+xRJyMLRjsn/1pgl4UqxZGeEilMy6Atgv+i1Q8478Fzbo5f+VYldCdLyj6Ii0rS1nFP/6WPUqJIXsG5dUORnNyYLIOI833NUAvLLlSbDaYgJFdX0b1Sdrbv86S+rkGwOxNeaX7KimrWBXS1TqgFep9C9e9A+Wx6z/44qvDAaFzzA4YwM/7+1Buz2UnYpV61m5aW6YS9L+si5eXJgbnsOvy3gyxpH0VLoF/W7HC8pN2OdlDQCfWg18uytIs+zOgRbC7xsxnAe5loWDIZMKqcYiJm/YCsSkzh0kYvQUy52jrz+k4MKhJAGmeky5IwlSO9/67wQsSJqqhvWVKcitVkli+FGDKvIE/wL+hvKXAct39yj+XFSNniGEzzEuCTSgCPmunCc0/YNCiJfIzEcoLgCYC+AweXDYDTmfuj0KNA2Q9b/0RrutMifSzGjhUC0skKWbQcU8ZNhnsZSyaYyd8NE+6tCToaPWLCH8+ntBwebPwNKfAYw9GdYT0k/ueHZwUTJ/VmcjHkQZH/uCcDtK1FBdy2diHLbxXZ9cWgOmaAKo=",
+  "id": "d07d8514ea96aa72b4380364b6af45665120a192796e769c3028782797a42cc7",
+  "pubkey": "8a9705c9296b6040aeac085c9cc64a52fe3fafe5801b25ace7e98178be23a104",
+  "sig": "ecf6d20d7093f93548176df77dc431eae11107509ef871eedbbdf3aed73616d0c1d9e4316c7eba317eff773458fc03e9a2dcf3491d783785ed3d145e35052b02"
+}

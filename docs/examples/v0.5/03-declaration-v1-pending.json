@@ -1,0 +1,38 @@
+{
+  "kind": 30520,
+  "created_at": 1777344002,
+  "tags": [
+    [
+      "d",
+      "team-design"
+    ],
+    [
+      "fa:context",
+      "https://4a4.ai/ns/v0"
+    ],
+    [
+      "alt",
+      "Audience: team-design (1 member, epoch 1)"
+    ],
+    [
+      "fa:epoch",
+      "1"
+    ],
+    [
+      "fa:epoch-pubkey",
+      "5d1e7ae7f37e6fb87f89324c13a04fd2e034660c41933d356dd567b36eafad6d"
+    ],
+    [
+      "p",
+      "8a9705c9296b6040aeac085c9cc64a52fe3fafe5801b25ace7e98178be23a104"
+    ],
+    [
+      "fa:pending",
+      "dd5857a114db166131d9553f6f16516ee4892a9e198dfe606f0f273b7d2e92a7:1893456000"
+    ]
+  ],
+  "content": "{\"@context\":\"https://4a4.ai/ns/v0\",\"@type\":\"Audience\",\"name\":\"team-design\",\"description\":\"Design notes shared with Allison.\",\"epoch\":1}",
+  "id": "f5155ad1d82781dbfae0dfa392fb9e7758afb4a9deebeb0038bf162e193a9143",
+  "pubkey": "05173fa1ee9541bcbd689cfe3d6268fdd7cc7d55c64309dd533107ca2f9fafcb",
+  "sig": "0d9d87211fe0dd92e92ba7b1dd94cd9e7ff9ba37235c83382636a2c618594d58a68204c8e687c6ad9c6eb864099b871b5426b95de9b7890638b3b7f4127df452"
+}
