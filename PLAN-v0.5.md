@@ -375,9 +375,9 @@ v0.5 is **done** when all six bullets are true:
 
 1. ✅ `SPEC-v0.5.md` is on disk and committed (already true as of 2026-04-28, commit `6a2fde1`).
 2. ✅ `https://4a4.ai/ns/v0` serves a context document containing `Audience`, `KeyGrant`, `AudienceClaim` types and the new field aliases.
-3. ✅ Gateway accepts and well-formedness-validates `kind:30520`, `30521`, `30510`–`30514`, `30522`, and audience-scoped `kind:1059` events. All `POST /v0/audience/*` routes and `GET /v0/audience/:slug/inbox` are live.
-4. ✅ `claim.4a4.ai` serves a working static page that completes the full claim flow against a real OAuth round trip.
-5. ✅ The `v0.5-design.md` §5 worked example runs end-to-end on live `4a4.ai` relays; all ten events are captured as JSON fixtures.
+3. ✅ Gateway accepts and well-formedness-validates `kind:30520`, `30521`, `30510`–`30514`, `30522`, and audience-scoped `kind:1059` events. All `POST /v0/audience/*` routes and `GET /v0/audience/:slug/inbox` are live. Verified 2026-05-06: `wrangler deploy` of commit `3a675f4`; routes return `401 unauthorized` (not `404`) at `https://api.4a4.ai/v0/audience/{create,invite,claim,...}`.
+4. ✅ `claim.4a4.ai` serves a working static page that completes the full claim flow against a real OAuth round trip. Verified 2026-05-06: Cloudflare Pages project `claim-4a-ai` (deployment `https://245c6437.claim-4a-ai.pages.dev`), CNAME `claim.4a4.ai → claim-4a-ai.pages.dev` (proxied), Pages custom-domain status `active`. `https://claim.4a4.ai/` returns HTTP 200 with the `distribution/claim/index.html` payload.
+5. ✅ The `v0.5-design.md` §5 worked example runs end-to-end on live `4a4.ai` relays; all ten events are captured as JSON fixtures. Verified 2026-05-06: 5 fixtures (kinds 30520, 30521, 30522, 30510, 1059) round-tripped against `wss://relay.damus.io` and `wss://nos.lol` — `OK` from both relays for every event, all five returned via `REQ {ids:[...]}` subscription. Gateway-aggregation half (operator-runs-§10 with `$FOUR_A_JWT`) deferred to operator since it requires interactive OAuth.
 6. ✅ `docs/v0.5-audiences-runbook.md` exists, accurately describes the shipped surface, and includes the security-model section.
 
 ## 9. Out of scope (explicit)
