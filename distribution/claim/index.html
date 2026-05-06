@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Claim audience invite — 4A</title>
+<meta name="description" content="Claim a 4A audience invite. One way among many — the same 4a:// URL also works in the Sonata plugin and the 4a CLI." />
+<link rel="canonical" href="https://claim.4a4.ai/" />
+<style>
+  :root { --fg:#111; --muted:#666; --bg:#fff; --accent:#1f6feb; --bd:#e6e6ec; }
+  html,body { margin:0; padding:0; }
+  body { font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif; color:var(--fg); background:var(--bg); line-height:1.5; }
+  main { max-width: 540px; margin: 0 auto; padding: 48px 20px 80px; }
+  h1 { font-size: 1.5rem; margin: 0 0 8px; letter-spacing: -0.01em; }
+  p { margin: 0 0 16px; color:#222; }
+  .muted { color: var(--muted); font-size: 0.92rem; }
+  .panel { border: 1px solid var(--bd); border-radius: 12px; padding: 20px; margin: 16px 0; background: #fafafb; }
+  .panel.warn { border-color:#fbe1b3; background:#fff8e7; }
+  .panel.error { border-color:#f3c5c5; background:#fff0f0; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin: 8px 0; }
+  .k { font-size: 0.85rem; color: var(--muted); }
+  .v { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; word-break: break-all; }
+  button {
+    appearance: none; border: 1px solid var(--accent); background: var(--accent);
+    color: #fff; padding: 10px 16px; border-radius: 999px; font-size: 0.95rem;
+    cursor: pointer;
+  }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: progress; }
+  details { margin-top: 16px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 0.92rem; }
+  hr { border: 0; border-top: 1px solid var(--bd); margin: 24px 0; }
+  a { color: var(--accent); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; background:#f3f3f6; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Claim a 4A audience invite</h1>
+  <p class="muted">
+    This page is one way to claim a 4A invite. The same <code>4a://</code> URL
+    works in the Sonata plugin and the <code>4a</code> CLI — pick whatever you
+    trust.
+  </p>
+
+  <section id="parsed" class="panel" hidden>
+    <div class="row"><span class="k">Audience</span><span class="v" id="p-slug">—</span></div>
+    <div class="row"><span class="k">Epoch</span><span class="v" id="p-epoch">—</span></div>
+    <div class="row"><span class="k">Invite key</span><span class="v" id="p-key">—</span></div>
+  </section>
+
+  <section id="bad-link" class="panel error" hidden>
+    <strong>This link doesn't look like a 4A invite.</strong>
+    <p class="muted">Expected URL shape:</p>
+    <p class="v">https://claim.4a4.ai/invite/&lt;slug&gt;/&lt;epoch&gt;?k=4ainv1…</p>
+  </section>
+
+  <section id="actions" class="panel" hidden>
+    <p>Continue with GitHub to derive your 4A pubkey, then post the claim event.</p>
+    <div class="row">
+      <button id="btn-github">Continue with GitHub</button>
+      <button id="btn-cli" class="secondary">Show CLI command</button>
+    </div>
+    <details>
+      <summary>What happens when I click "Continue with GitHub"?</summary>
+      <p class="muted">
+        We start an OAuth round trip with the 4A gateway at <code>api.4a4.ai</code>.
+        After auth we sign a <code>kind:30522</code> claim event with the
+        invite key from this URL and publish it to the relay set. The audience
+        owner's daemon picks it up, rotates the audience key, and grants you a
+        per-epoch decryption key.
+      </p>
+      <p class="muted">
+        Your invite key never leaves this browser session.
+        <em>Note: the v0.5 first-pass implementation POSTs the invite key to
+        the gateway over HTTPS so a Nostr signing library doesn't have to
+        load in the page; a hardening pass will move signing into the page
+        once the §5 walk-through proves out.</em>
+      </p>
+    </details>
+  </section>
+
+  <section id="result" class="panel" hidden>
+    <strong>Claim sent.</strong>
+    <p class="muted">The audience owner should grant you a per-epoch key shortly. You can keep this page open or close it.</p>
+    <div class="row"><span class="k">Claim event</span><span class="v" id="r-event">—</span></div>
+    <hr />
+    <p>What kind of access do you want?</p>
+    <div class="row">
+      <button id="btn-local">Keep audience local (download key)</button>
+      <button id="btn-delegate" class="secondary">Let 4a4.ai decrypt for me</button>
+    </div>
+  </section>
+
+  <section id="cli" class="panel" hidden>
+    <p>Run this from a terminal:</p>
+    <pre class="v" id="cli-cmd">4a audience claim …</pre>
+  </section>
+
+  <hr />
+  <p class="muted">
+    <a href="https://4a4.ai/">4a4.ai</a> · This is one host of convenience, not
+    a privileged authority. The protocol is independent of any one operator.
+  </p>
+</main>
+
+<script>
+  // ─── Parse the invite URL ────────────────────────────────────────────────
+  const url = new URL(window.location.href);
+  const m = url.pathname.match(/^\/invite\/([A-Za-z0-9-]+)\/(\d+)\/?$/);
+  const k = url.searchParams.get("k") ?? "";
+  const isInviteShape = !!m && /^4ainv1[02-9ac-hj-np-z]+$/i.test(k);
+
+  if (!isInviteShape) {
+    document.getElementById("bad-link").hidden = false;
+  } else {
+    const [, slug, epoch] = m;
+    document.getElementById("parsed").hidden = false;
+    document.getElementById("p-slug").textContent = slug;
+    document.getElementById("p-epoch").textContent = epoch;
+    document.getElementById("p-key").textContent = k.length > 20 ? k.slice(0, 14) + "…" + k.slice(-6) : k;
+    document.getElementById("actions").hidden = false;
+
+    document.getElementById("btn-cli").addEventListener("click", () => {
+      const cli = `4a audience claim --address 30520:<aud_id_hex>:${slug} --epoch ${epoch} --k ${k}`;
+      document.getElementById("cli-cmd").textContent = cli;
+      document.getElementById("cli").hidden = false;
+    });
+
+    document.getElementById("btn-github").addEventListener("click", () => {
+      const here = encodeURIComponent(window.location.href);
+      window.location.assign(
+        `https://api.4a4.ai/auth/github/start?return_to=${here}`
+      );
+    });
+
+    document.getElementById("btn-local").addEventListener("click", async () => {
+      // Local-only: we already published the claim in the post-OAuth callback
+      // (out of scope of this initial static page). Trigger key download:
+      const blob = new Blob([k + "\n"], { type: "text/plain" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `4a-${slug}-epoch-${epoch}-invite.4ainv`;
+      a.click();
+    });
+
+    document.getElementById("btn-delegate").addEventListener("click", async () => {
+      const audAddr = sessionStorage.getItem("audience_address") ?? "";
+      if (!audAddr) {
+        alert("audience_address not set — finish OAuth first.");
+        return;
+      }
+      const r = await fetch(`https://api.4a4.ai/v0/audience/${slug}/delegate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audience_address: audAddr }),
+      });
+      const text = await r.text();
+      alert(`Delegate response: ${r.status}\n${text}`);
+    });
+  }
+
+  // ─── Post-OAuth callback handling ────────────────────────────────────────
+  // The gateway redirects back with the JWT and the user's nostr_pub in the
+  // query string. We POST /v0/audience/claim and surface the result.
+  const callbackJwt = url.searchParams.get("jwt");
+  const callbackPub = url.searchParams.get("nostr_pub");
+  if (callbackJwt && callbackPub && m) {
+    sessionStorage.setItem("jwt", callbackJwt);
+    sessionStorage.setItem("nostr_pub", callbackPub);
+    // We need the inviter pubkey + audience_address. These are NOT in the URL
+    // by default; the inviter's client should embed them. For now: read from
+    // ?inviter and ?address query params if present, else prompt.
+    const inviterPub = url.searchParams.get("inviter");
+    const audienceAddress = url.searchParams.get("address");
+    if (inviterPub && audienceAddress) {
+      sessionStorage.setItem("audience_address", audienceAddress);
+      const claimBtn = document.getElementById("btn-github");
+      if (claimBtn) {
+        claimBtn.disabled = true;
+        claimBtn.textContent = "Sending claim…";
+      }
+      const [, slug, epoch] = m;
+      fetch("https://api.4a4.ai/v0/audience/claim", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${callbackJwt}`,
+        },
+        body: JSON.stringify({
+          audience_address: audienceAddress,
+          epoch: Number(epoch),
+          invite_priv_4ainv: k,
+          claim_pubkey: callbackPub,
+          inviter_pubkey: inviterPub,
+          note: "claimed via claim.4a4.ai",
+        }),
+      })
+        .then((r) => r.json())
+        .then((j) => {
+          document.getElementById("actions").hidden = true;
+          document.getElementById("result").hidden = false;
+          document.getElementById("r-event").textContent = j.claim_event_id ?? "—";
+        })
+        .catch((err) => {
+          alert("Claim failed: " + err.message);
+        });
+    }
+  }
+</script>
+</body>
+</html>

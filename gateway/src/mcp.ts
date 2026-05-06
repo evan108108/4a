@@ -31,8 +31,9 @@ import {
   CommentValidationError,
   type CommentEnv,
 } from "./comment";
+import { __audienceRoutes, type AudienceEnv } from "./audience";
 
-interface McpEnv extends PublishEnv, ScoreEnv, CommentEnv {
+interface McpEnv extends PublishEnv, ScoreEnv, CommentEnv, AudienceEnv {
   RELAY_POOL: DurableObjectNamespace<RelayPool>;
   MCP_HUB: DurableObjectNamespace<McpHub>;
 }
@@ -439,6 +440,136 @@ const TOOLS: ToolDef[] = [
       },
     ],
   },
+  // ── v0.5 audience tools ─────────────────────────────────────────────────
+  {
+    name: "audience_create",
+    description:
+      "Create a new private 4A audience. Generates aud_id + aud_epoch_1, publishes the kind:30520 declaration, and issues a founding kind:30521 to the calling user. Returns the audience_address, the audience identity priv (gateway does NOT persist — caller stores), and the first epoch keypair.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        slug: { type: "string", description: "Audience slug (alphanum + hyphens, e.g. 'team-design')" },
+        name: { type: "string", description: "Human-readable name" },
+        description: { type: "string", description: "One or two sentences" },
+      },
+      required: ["slug", "name"],
+      additionalProperties: false,
+    },
+    examples: [{ name: "audience_create", arguments: { slug: "team-design", name: "team-design", description: "Design notes shared with Allison." } }],
+  },
+  {
+    name: "audience_invite",
+    description: "Generate a one-shot 4ainv1… invite key, republish the audience declaration with a new fa:pending tag, and return the 4a:// + claim.4a4.ai URLs to share off-band.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        audience_address: { type: "string", description: "30520:<aud_id-hex>:<slug>" },
+        aud_id_priv: { type: "string", description: "Audience identity priv (32-byte hex; from audience_create)" },
+        ttl_seconds: { type: "integer", minimum: 60, default: 604800 },
+      },
+      required: ["audience_address", "aud_id_priv"],
+      additionalProperties: false,
+    },
+    examples: [],
+  },
+  {
+    name: "audience_grant",
+    description: "Issue a kind:30521 key-grant directly to a known recipient pubkey (no claim flow). Republishes the declaration to add the recipient to the public roster.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        audience_address: { type: "string" },
+        aud_id_priv: { type: "string" },
+        aud_epoch_priv: { type: "string", description: "Current epoch private key" },
+        recipient_pubkey: { type: "string" },
+      },
+      required: ["audience_address", "aud_id_priv", "aud_epoch_priv", "recipient_pubkey"],
+      additionalProperties: false,
+    },
+    examples: [],
+  },
+  {
+    name: "audience_claim",
+    description: "Sign and publish a kind:30522 audience-claim with the invite_priv decoded from the 4ainv1… string. Used by the claim page after OAuth.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        audience_address: { type: "string" },
+        epoch: { type: "integer", minimum: 1 },
+        invite_priv_4ainv: { type: "string", description: "4ainv1… bech32 invite key" },
+        claim_pubkey: { type: "string", description: "Invitee identity pubkey" },
+        inviter_pubkey: { type: "string", description: "Audience-owner identity pubkey (recipient of the claim's `p` tag)" },
+        note: { type: "string" },
+      },
+      required: ["audience_address", "epoch", "invite_priv_4ainv", "claim_pubkey", "inviter_pubkey"],
+      additionalProperties: false,
+    },
+    examples: [],
+  },
+  {
+    name: "audience_rotate",
+    description: "Bump the audience's epoch number, generate a fresh aud_epoch keypair, republish the declaration with the updated roster, and fan out kind:30521 grants to every post-rotation member.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        audience_address: { type: "string" },
+        aud_id_priv: { type: "string" },
+        add_members: { type: "array", items: { type: "string" }, default: [] },
+        remove_members: { type: "array", items: { type: "string" }, default: [] },
+        remove_pending: { type: "array", items: { type: "string" }, default: [] },
+      },
+      required: ["audience_address", "aud_id_priv"],
+      additionalProperties: false,
+    },
+    examples: [],
+  },
+  {
+    name: "audience_publish",
+    description: "Publish a 4A object (Observation / Claim / Entity / Relation / Commons) into a private audience. NIP-44-encrypts the payload to the current aud_epoch_pub, builds the kind:30510-30514 rumor, NIP-17 gift-wraps once per current member, and fans out the wraps. Caller must be a current member.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        audience_address: { type: "string" },
+        aud_epoch_pub: { type: "string", description: "Current epoch pubkey (from audience_create or audience_rotate)" },
+        kind: { type: "integer", enum: [30510, 30511, 30512, 30513, 30514] },
+        d_tag: { type: "string", description: "Replaceable d-slug" },
+        alt: { type: "string", description: "One-line summary; MUST NOT leak inner payload" },
+        payload: { type: "object", description: "JSON-LD payload (matches the public-kind shape)" },
+      },
+      required: ["audience_address", "aud_epoch_pub", "kind", "d_tag", "alt", "payload"],
+      additionalProperties: false,
+    },
+    examples: [],
+  },
+  {
+    name: "audience_inbox",
+    description: "Read recent audience-addressed events for the calling user. Runs the §2.5 capability-based decryption pipeline: pull cached gift-wraps, NIP-17 unwrap, look up the matching kind:30521 grant, NIP-44-decrypt the rumor content, return parsed JSON-LD payloads.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        slug: { type: "string", description: "Audience slug (filters the inbox to this audience)" },
+        since: { type: "integer", description: "Unix timestamp; only return events with created_at >= since" },
+        limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+      },
+      required: ["slug"],
+      additionalProperties: false,
+    },
+    examples: [],
+  },
+  {
+    name: "audience_process_claims",
+    description: "Polled equivalent of the §4 claim-watcher. Scans the audience's pending invites for matching kind:30522 events and triggers a rotation that adds the new members + drops the matched pending entries. Idempotent.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        audience_address: { type: "string" },
+        aud_id_priv: { type: "string" },
+      },
+      required: ["audience_address", "aud_id_priv"],
+      additionalProperties: false,
+    },
+    examples: [],
+  },
 ];
 
 function getPool(env: McpEnv): DurableObjectStub<RelayPool> {
@@ -480,6 +611,15 @@ async function callTool(
       return runScoreTool(args, env, session);
     case "comment":
       return runCommentTool(args, env, session);
+    case "audience_create":
+    case "audience_invite":
+    case "audience_grant":
+    case "audience_claim":
+    case "audience_rotate":
+    case "audience_publish":
+    case "audience_inbox":
+    case "audience_process_claims":
+      return runAudienceTool(name, args, env, session);
     default:
       throw rpcError(METHOD_NOT_FOUND, `unknown tool: ${name}`);
   }
@@ -507,6 +647,89 @@ async function runAuth(
     login: claims.login,
     expiresAt: new Date(claims.exp * 1000).toISOString(),
   };
+}
+
+async function runAudienceTool(
+  name: string,
+  args: Record<string, unknown>,
+  env: McpEnv,
+  session: Session,
+): Promise<unknown> {
+  if (!session.claims) {
+    throw rpcError(
+      INVALID_REQUEST,
+      "not authenticated — call auth_4a with a JWT from https://api.4a4.ai/auth/github/start",
+    );
+  }
+  try {
+    let resp: Response;
+    switch (name) {
+      case "audience_create": {
+        const body = __audienceRoutes.validateCreateBody(args);
+        resp = await __audienceRoutes.runCreate(body, session.claims, env);
+        break;
+      }
+      case "audience_invite": {
+        const body = __audienceRoutes.validateInviteBody(args);
+        resp = await __audienceRoutes.runInvite(body, env);
+        break;
+      }
+      case "audience_grant": {
+        const body = __audienceRoutes.validateGrantBody(args);
+        resp = await __audienceRoutes.runGrant(body, session.claims, env);
+        break;
+      }
+      case "audience_claim": {
+        const body = __audienceRoutes.validateClaimBody(args);
+        resp = await __audienceRoutes.runClaim(body, env);
+        break;
+      }
+      case "audience_rotate": {
+        const body = __audienceRoutes.validateRotateBody(args);
+        resp = await __audienceRoutes.runRotate(body, session.claims, env);
+        break;
+      }
+      case "audience_publish": {
+        const body = __audienceRoutes.validateAudiencePublishBody(args);
+        resp = await __audienceRoutes.runAudiencePublish(body, session.claims, env);
+        break;
+      }
+      case "audience_process_claims": {
+        const body = __audienceRoutes.validateProcessClaimsBody(args);
+        resp = await __audienceRoutes.runProcessClaims(body, session.claims, env);
+        break;
+      }
+      case "audience_inbox": {
+        const slug = typeof args.slug === "string" ? args.slug : "";
+        if (!slug) throw rpcError(INVALID_PARAMS, "slug is required");
+        const since = typeof args.since === "number" ? args.since : undefined;
+        const limit =
+          typeof args.limit === "number"
+            ? Math.min(Math.max(args.limit, 1), 200)
+            : 50;
+        resp = await __audienceRoutes.runInbox(slug, since, limit, session.claims, env);
+        break;
+      }
+      default:
+        throw rpcError(METHOD_NOT_FOUND, `unknown audience tool: ${name}`);
+    }
+    const json = await resp.json();
+    if (!resp.ok) {
+      const code = resp.status === 400 ? INVALID_PARAMS : INTERNAL_ERROR;
+      const j = json as Record<string, unknown>;
+      throw rpcError(code, String(j.message ?? "audience tool failed"), j);
+    }
+    return json;
+  } catch (err) {
+    if (err instanceof RpcError) throw err;
+    if (err instanceof Error && err.name === "AudienceValidationError") {
+      throw rpcError(INVALID_PARAMS, err.message);
+    }
+    throw rpcError(
+      INTERNAL_ERROR,
+      err instanceof Error ? err.message : "audience tool failed",
+    );
+  }
 }
 
 async function runPublishTool(

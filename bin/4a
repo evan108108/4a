@@ -36,8 +36,9 @@ const HELP_ROOT = `4a — Agent-Agnostic Accessible Archive CLI
 Usage: 4a <subcommand> [options]
 
 Subcommands:
-  score    Publish a kind:30506 score and its paired kind:30507 rationale
-  comment  Publish a standalone kind:30507 comment
+  score      Publish a kind:30506 score and its paired kind:30507 rationale
+  comment    Publish a standalone kind:30507 comment
+  audience   v0.5 — manage private audiences (create / invite / grant / claim / rotate / publish / inbox)
 
 Auth:
   Set FOUR_A_JWT to a 4A bearer JWT before running. Obtain one via
@@ -242,6 +243,179 @@ async function cmdComment(argv) {
   );
 }
 
+// ─── 4a audience subcommands ─────────────────────────────────────────────────
+
+const HELP_AUDIENCE = `4a audience — manage 4A v0.5 private audiences
+
+Usage:
+  4a audience create   --slug <slug> --name <name> [--description <text>]
+  4a audience invite   --address <30520:pub:slug> --aud-id-priv <hex> [--ttl <seconds>]
+  4a audience grant    --address <30520:pub:slug> --aud-id-priv <hex> --aud-epoch-priv <hex> --recipient <pubhex>
+  4a audience claim    --address <30520:pub:slug> --epoch <n> --k <4ainv1...> --claim <pubhex> --inviter <pubhex> [--note <text>]
+  4a audience rotate   --address <30520:pub:slug> --aud-id-priv <hex> [--add <pubhex>]* [--remove <pubhex>]* [--remove-pending <pubhex>]*
+  4a audience publish  --address <30520:pub:slug> --aud-epoch-pub <hex> --kind <30510..30514> --d <slug> --alt <text> --payload <json>
+  4a audience inbox    --slug <slug> [--since <unix>] [--limit <n>]
+  4a audience process-claims --address <30520:pub:slug> --aud-id-priv <hex>
+
+All subcommands require an auth bearer ($FOUR_A_JWT or $FOA_JWT) and use
+the gateway at $FOUR_A_GATEWAY (default https://api.4a4.ai). Each prints
+the gateway response as JSON on stdout.
+`;
+
+async function audiencePost(path, body) {
+  const jwt = getJwt();
+  if (!jwt) die(2, '4a audience: $FOUR_A_JWT not set (auth required)');
+  const r = await fetch(`${getGateway()}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+    body: JSON.stringify(body),
+  });
+  const text = await r.text();
+  let parsed = text;
+  try { parsed = JSON.parse(text); } catch {}
+  process.stdout.write(JSON.stringify(parsed, null, 2) + "\n");
+  if (!r.ok) process.exit(1);
+}
+
+async function audienceGet(path) {
+  const jwt = getJwt();
+  if (!jwt) die(2, '4a audience: $FOUR_A_JWT not set (auth required)');
+  const r = await fetch(`${getGateway()}${path}`, {
+    headers: { Authorization: `Bearer ${jwt}` },
+  });
+  const text = await r.text();
+  let parsed = text;
+  try { parsed = JSON.parse(text); } catch {}
+  process.stdout.write(JSON.stringify(parsed, null, 2) + "\n");
+  if (!r.ok) process.exit(1);
+}
+
+function parseAudienceArgs(argv, options) {
+  const { values, positionals } = parseArgs({ args: argv, options, allowPositionals: true, strict: false });
+  return { values, positionals };
+}
+
+async function cmdAudience(argv) {
+  if (argv.length === 0 || argv[0] === '-h' || argv[0] === '--help' || argv[0] === 'help') {
+    process.stdout.write(HELP_AUDIENCE);
+    return;
+  }
+  const sub = argv[0];
+  const rest = argv.slice(1);
+  switch (sub) {
+    case 'create': {
+      const { values } = parseAudienceArgs(rest, {
+        slug: { type: 'string' }, name: { type: 'string' }, description: { type: 'string' },
+      });
+      if (!values.slug || !values.name) die(2, '4a audience create: --slug and --name required');
+      return audiencePost('/v0/audience/create', { slug: values.slug, name: values.name, description: values.description });
+    }
+    case 'invite': {
+      const { values } = parseAudienceArgs(rest, {
+        address: { type: 'string' }, 'aud-id-priv': { type: 'string' }, ttl: { type: 'string' },
+      });
+      if (!values.address || !values['aud-id-priv']) die(2, '4a audience invite: --address and --aud-id-priv required');
+      const body = { audience_address: values.address, aud_id_priv: values['aud-id-priv'] };
+      if (values.ttl) body.ttl_seconds = Number(values.ttl);
+      return audiencePost('/v0/audience/invite', body);
+    }
+    case 'grant': {
+      const { values } = parseAudienceArgs(rest, {
+        address: { type: 'string' }, 'aud-id-priv': { type: 'string' },
+        'aud-epoch-priv': { type: 'string' }, recipient: { type: 'string' },
+      });
+      if (!values.address || !values['aud-id-priv'] || !values['aud-epoch-priv'] || !values.recipient) {
+        die(2, '4a audience grant: --address, --aud-id-priv, --aud-epoch-priv, --recipient required');
+      }
+      return audiencePost('/v0/audience/grant', {
+        audience_address: values.address,
+        aud_id_priv: values['aud-id-priv'],
+        aud_epoch_priv: values['aud-epoch-priv'],
+        recipient_pubkey: values.recipient,
+      });
+    }
+    case 'claim': {
+      const { values } = parseAudienceArgs(rest, {
+        address: { type: 'string' }, epoch: { type: 'string' }, k: { type: 'string' },
+        claim: { type: 'string' }, inviter: { type: 'string' }, note: { type: 'string' },
+      });
+      if (!values.address || !values.epoch || !values.k || !values.claim || !values.inviter) {
+        die(2, '4a audience claim: --address, --epoch, --k, --claim, --inviter required');
+      }
+      return audiencePost('/v0/audience/claim', {
+        audience_address: values.address,
+        epoch: Number(values.epoch),
+        invite_priv_4ainv: values.k,
+        claim_pubkey: values.claim,
+        inviter_pubkey: values.inviter,
+        note: values.note,
+      });
+    }
+    case 'rotate': {
+      const { values } = parseAudienceArgs(rest, {
+        address: { type: 'string' }, 'aud-id-priv': { type: 'string' },
+        add: { type: 'string', multiple: true }, remove: { type: 'string', multiple: true },
+        'remove-pending': { type: 'string', multiple: true },
+      });
+      if (!values.address || !values['aud-id-priv']) {
+        die(2, '4a audience rotate: --address and --aud-id-priv required');
+      }
+      return audiencePost('/v0/audience/rotate', {
+        audience_address: values.address,
+        aud_id_priv: values['aud-id-priv'],
+        add_members: values.add ?? [],
+        remove_members: values.remove ?? [],
+        remove_pending: values['remove-pending'] ?? [],
+      });
+    }
+    case 'publish': {
+      const { values } = parseAudienceArgs(rest, {
+        address: { type: 'string' }, 'aud-epoch-pub': { type: 'string' },
+        kind: { type: 'string' }, d: { type: 'string' }, alt: { type: 'string' },
+        payload: { type: 'string' },
+      });
+      if (!values.address || !values['aud-epoch-pub'] || !values.kind || !values.d || !values.alt || !values.payload) {
+        die(2, '4a audience publish: --address, --aud-epoch-pub, --kind, --d, --alt, --payload required');
+      }
+      let payload;
+      try { payload = JSON.parse(values.payload); } catch (err) { die(2, `4a audience publish: --payload must be JSON: ${err.message}`); }
+      return audiencePost('/v0/audience/publish', {
+        audience_address: values.address,
+        aud_epoch_pub: values['aud-epoch-pub'],
+        kind: Number(values.kind),
+        d_tag: values.d,
+        alt: values.alt,
+        payload,
+      });
+    }
+    case 'inbox': {
+      const { values } = parseAudienceArgs(rest, {
+        slug: { type: 'string' }, since: { type: 'string' }, limit: { type: 'string' },
+      });
+      if (!values.slug) die(2, '4a audience inbox: --slug required');
+      const params = new URLSearchParams();
+      if (values.since) params.set('since', values.since);
+      if (values.limit) params.set('limit', values.limit);
+      const qs = params.toString();
+      return audienceGet(`/v0/audience/${encodeURIComponent(values.slug)}/inbox${qs ? '?' + qs : ''}`);
+    }
+    case 'process-claims': {
+      const { values } = parseAudienceArgs(rest, {
+        address: { type: 'string' }, 'aud-id-priv': { type: 'string' },
+      });
+      if (!values.address || !values['aud-id-priv']) {
+        die(2, '4a audience process-claims: --address and --aud-id-priv required');
+      }
+      return audiencePost('/v0/audience/process-claims', {
+        audience_address: values.address,
+        aud_id_priv: values['aud-id-priv'],
+      });
+    }
+    default:
+      die(2, `4a audience: unknown subcommand "${sub}" (run "4a audience --help")`);
+  }
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   if (argv.length === 0 || argv[0] === "-h" || argv[0] === "--help" || argv[0] === "help") {
@@ -256,6 +430,9 @@ async function main() {
       return;
     case "comment":
       await cmdComment(rest);
+      return;
+    case "audience":
+      await cmdAudience(rest);
       return;
     default:
       die(2, `4a: unknown subcommand "${subcommand}" (run "4a --help")`);

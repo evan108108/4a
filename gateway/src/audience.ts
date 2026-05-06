@@ -1133,3 +1133,24 @@ export {
   validateEncryptedVariantEvent,
   validateGiftWrapEvent,
 };
+
+// Re-exports for the MCP shim that wraps these routes as JSON-RPC tools.
+// Each accepts a parsed body and returns a Response (the MCP layer reads the
+// body back out via .json()). Auth is handled by the MCP session.
+export const __audienceRoutes = {
+  runCreate,
+  runInvite,
+  runGrant,
+  runClaim,
+  runRotate,
+  runAudiencePublish,
+  runProcessClaims,
+  runInbox,
+  validateCreateBody,
+  validateInviteBody,
+  validateGrantBody,
+  validateClaimBody,
+  validateRotateBody,
+  validateAudiencePublishBody,
+  validateProcessClaimsBody,
+};

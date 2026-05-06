@@ -26,6 +26,7 @@ import type { McpHub } from "./mcp";
 import { handlePublishRequest } from "./publish";
 import type { RelayPool } from "./relay-pool";
 import { handleScoreRequest } from "./score";
+import { handleWellKnownNostrJson } from "./well-known";
 
 export { RelayPool } from "./relay-pool";
 export { McpHub } from "./mcp";
@@ -41,6 +42,7 @@ interface Env {
   AWS_SECRET_ACCESS_KEY: string;
   AWS_REGION: string;
   KMS_DERIVATION_KEY_ID: string;
+  NOSTR_DIRECTORY_JSON?: string;
 }
 
 const CONTEXT_HEADERS: HeadersInit = {
@@ -90,6 +92,11 @@ export default {
         return protectedResourceMetadata();
       }
       return handleMcpRequest(request, env);
+    }
+
+    // NIP-05 directory + v0.5 fa extension — served from the apex (4a4.ai/.well-known/nostr.json).
+    if (url.pathname === "/.well-known/nostr.json") {
+      return handleWellKnownNostrJson(request, env);
     }
 
     // JSON-LD context document — custom headers, served from worker code.
