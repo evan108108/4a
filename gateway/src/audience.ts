@@ -1038,6 +1038,33 @@ export async function handleAudienceRequest(
   const url = new URL(request.url);
   const path = url.pathname;
 
+  // GET /v0/audience/:slug/declaration?aud_id_pub=<hex> — public read for the
+  // current cached kind:30520 declaration. No auth: declarations are public
+  // Nostr events on the relay pool, so leaking content is no leak. Used by
+  // the Sonata Studio plugin's "join" flow to discover the audience identity
+  // before it has membership (chicken-and-egg with the SSE stream).
+  const declMatch = path.match(/^\/v0\/audience\/([A-Za-z0-9-]+)\/declaration$/);
+  if (declMatch) {
+    if (request.method !== "GET") {
+      return jsonError("method_not_allowed", `${request.method} not allowed`, 405);
+    }
+    const slug = declMatch[1]!;
+    const audIdPubRaw = url.searchParams.get("aud_id_pub");
+    if (!audIdPubRaw || !HEX64.test(audIdPubRaw)) {
+      return jsonError("bad_request", "aud_id_pub query param must be 32-byte hex", 400);
+    }
+    const audIdPub = audIdPubRaw.toLowerCase();
+    const cached = await lookupDeclarationByAddress(audIdPub, slug, env);
+    if (!cached) {
+      return jsonError("not_found", "audience declaration not found", 404);
+    }
+    return jsonResponse({
+      ok: true,
+      audience_address: audienceAddress(audIdPub, slug),
+      declaration: cached.event,
+    });
+  }
+
   // /v0/audience/:slug/inbox is a GET path; everything else is POST.
   const inboxMatch = path.match(/^\/v0\/audience\/([A-Za-z0-9-]+)\/inbox$/);
   if (inboxMatch) {

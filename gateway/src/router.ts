@@ -20,6 +20,8 @@ import {
   protectedResourceMetadata,
 } from "./auth";
 import { handleAudienceRequest } from "./audience";
+import { handleAudienceRawRequest } from "./audience-raw";
+import { handleAudienceStreamRequest } from "./audience-stream";
 import { handleCommentRequest } from "./comment";
 import { handleMcpRequest } from "./mcp";
 import type { McpHub } from "./mcp";
@@ -80,6 +82,17 @@ export default {
       }
       if (url.pathname === "/v0/comment") {
         return handleCommentRequest(request, env);
+      }
+      if (url.pathname.startsWith("/v0/audience/raw/")) {
+        return handleAudienceRawRequest(request, env);
+      }
+      // SSE stream: GET /v0/audience/:slug/stream — must match before the
+      // generic /v0/audience/ dispatcher so the inbox/JWT path doesn't claim it.
+      const streamMatch = url.pathname.match(
+        /^\/v0\/audience\/([A-Za-z0-9-]+)\/stream$/,
+      );
+      if (streamMatch) {
+        return handleAudienceStreamRequest(request, streamMatch[1]!, env);
       }
       if (url.pathname.startsWith("/v0/audience/")) {
         return handleAudienceRequest(request, env);

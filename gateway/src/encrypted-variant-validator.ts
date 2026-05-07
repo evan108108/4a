@@ -1,22 +1,32 @@
-// Well-formedness validator for kind:30510-30514 (encrypted variants).
+// Well-formedness validator for kind:30510-30514 + 30530-30536 (encrypted
+// variants — v0.5 base + Sonata Studio v0 vocabulary).
 //
 // Per SPEC-v0.5 §3.6 — checks tag shape, BLAKE3-of-ciphertext, and the
 // invariant that the `p`-tag set equals the current declaration's member
 // set (the publisher MUST address every current member; missing or extra
-// `p` tags are a publish-time error).
+// `p` tags are a publish-time error). Studio kinds (30530-30536) follow
+// the same wire shape and are validated by the same path; their inner
+// JSON-LD payload is validated separately by gateway/src/studio-v0/
+// validators.ts (validateStudioWireEvent + per-kind payload validators).
 //
 // Note: these events MUST NOT be published bare — they are wrapped in
 // kind:1059 gift-wraps before fan-out per §4. This validator is run at
 // rumor-build time inside the publish path; the wire-level check that the
 // rumor never escaped a wrap is enforced by the §4.5 gift-wrap validator
-// rejecting bare 30510-30514 deliveries.
+// rejecting bare 30510-30514 + 30530-30536 deliveries.
 
 import type { AudienceLookup } from "./audience-validator";
 import { blake3ContentTag } from "./lib/blake3-tag";
 import { isStructurallyValid as nip44IsStructurallyValid } from "./lib/nip44";
 import type { NostrEvent } from "./relay-pool";
 
-export const ENCRYPTED_VARIANT_KINDS = [30510, 30511, 30512, 30513, 30514] as const;
+export const ENCRYPTED_VARIANT_KINDS = [
+  // v0.5 base encrypted variants (SPEC-v0.5 §3).
+  30510, 30511, 30512, 30513, 30514,
+  // Sonata Studio v0 vocabulary (sonata-studio-v0-spec.md). Same wire shape;
+  // payload-level validation lives in gateway/src/studio-v0/validators.ts.
+  30530, 30531, 30532, 30533, 30534, 30535, 30536,
+] as const;
 type EncryptedVariantKind = (typeof ENCRYPTED_VARIANT_KINDS)[number];
 
 const FA_CONTEXT_V0 = "https://4a4.ai/ns/v0";
@@ -52,7 +62,7 @@ export function validateEncryptedVariantEvent(
   if (!ENCRYPTED_VARIANT_KINDS.includes(event.kind as EncryptedVariantKind)) {
     return {
       ok: false,
-      error: `kind ${event.kind} not in encrypted-variant range 30510-30514`,
+      error: `kind ${event.kind} not in encrypted-variant range 30510-30514, 30530-30536`,
     };
   }
   const dTag = findTag(event.tags, "d");

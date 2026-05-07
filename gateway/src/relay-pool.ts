@@ -295,6 +295,41 @@ export class RelayPool extends DurableObject<unknown> {
     return out;
   }
 
+  /**
+   * Fetch cached kind:30521 key-grants where the recipient (last segment of
+   * the d-tag, `<slug>:<epoch>:<recipient>`) matches `recipient`. Optional
+   * `sinceUnix` filters to grants with `created_at > sinceUnix`. Returns up
+   * to `limit` events, oldest-first.
+   *
+   * Implementation: scans the `event:30521:*` keyspace and filters by
+   * d-tag suffix. Acceptable at v0 scale; if the audience grant table grows
+   * past O(thousands), revisit by adding a per-recipient secondary index
+   * mirrored from storeAudienceEvent.
+   */
+  async listKeyGrants(
+    recipient: string,
+    sinceUnix?: number,
+    limit = 100,
+  ): Promise<NostrEvent[]> {
+    if (!/^[0-9a-f]{64}$/i.test(recipient)) return [];
+    const recipientLower = recipient.toLowerCase();
+    const list = await this.ctx.storage.list<NostrEvent>({
+      prefix: `${EVENT_PREFIX}30521:`,
+    });
+    const out: NostrEvent[] = [];
+    for (const ev of list.values()) {
+      if (sinceUnix !== undefined && ev.created_at <= sinceUnix) continue;
+      const dTag = findTag(ev.tags, "d");
+      if (!dTag) continue;
+      const idx = dTag.lastIndexOf(":");
+      if (idx < 0) continue;
+      if (dTag.slice(idx + 1).toLowerCase() !== recipientLower) continue;
+      out.push(ev);
+    }
+    out.sort((a, b) => a.created_at - b.created_at);
+    return out.slice(0, limit);
+  }
+
   async listCommons(): Promise<NostrEvent[]> {
     await this.ensureConnected();
     const list = await this.ctx.storage.list<NostrEvent>({ prefix: COMMONS_PREFIX });
