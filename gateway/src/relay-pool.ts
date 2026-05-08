@@ -72,6 +72,17 @@ const EVENT_PREFIX = "event:";
 const COMMONS_PREFIX = "event:30504:";
 const RECONNECT_PREFIX = "reconnect:";
 const RETRY_PREFIX = "retry:";
+// Reverse index: invite_pub → {audIdPub, slug, status}. Maintained by
+// storeAudienceEvent for kind:30520 declarations so the public
+// /v0/audience/by-invite-pub/<pub> route can resolve a declaration without
+// scanning every cached audience.
+const PENDING_INVITE_PREFIX = "pinv:";
+
+interface PendingInviteIndexEntry {
+  audIdPub: string;
+  slug: string;
+  status: "active" | "removed";
+}
 
 export interface NostrEvent {
   id: string;
@@ -119,6 +130,23 @@ function findTag(tags: string[][], name: string): string | undefined {
 function findTagValues(tags: string[][], name: string): string[] {
   const out: string[] = [];
   for (const t of tags) if (t[0] === name && typeof t[1] === "string") out.push(t[1]);
+  return out;
+}
+
+// Parse the set of invite pubkeys present in a kind:30520 declaration's
+// `fa:pending` tags. Tag format per audience-validator.ts:
+//   ["fa:pending", "<invite_pub_hex>:<expiration_unix>"]
+function parsePendingInvitePubs(event: NostrEvent): Set<string> {
+  const out = new Set<string>();
+  for (const t of event.tags) {
+    if (t[0] !== "fa:pending") continue;
+    const v = t[1];
+    if (typeof v !== "string") continue;
+    const idx = v.indexOf(":");
+    if (idx < 0) continue;
+    const pub = v.slice(0, idx).toLowerCase();
+    if (/^[0-9a-f]{64}$/.test(pub)) out.add(pub);
+  }
   return out;
 }
 
@@ -238,7 +266,80 @@ export class RelayPool extends DurableObject<unknown> {
       return { ok: true, reason: "superseded by existing newer event" };
     }
     await this.ctx.storage.put(key, event);
+    if (event.kind === 30520) {
+      await this.updatePendingInviteIndex(existing ?? null, event);
+    }
     return { ok: true };
+  }
+
+  /**
+   * Maintain the `pinv:<invite_pub>` reverse index for kind:30520
+   * declarations. Pending invite_pubs in the new declaration are written as
+   * `active`; pubs that disappeared from the previous declaration's pending
+   * list (claim consumed or rotation removed them) are marked `removed` so
+   * downstream readers can return 410 instead of 404.
+   */
+  private async updatePendingInviteIndex(
+    previous: NostrEvent | null,
+    next: NostrEvent,
+  ): Promise<void> {
+    const audIdPub = next.pubkey.toLowerCase();
+    const slug = findTag(next.tags, "d") ?? "";
+    const newPending = parsePendingInvitePubs(next);
+    const oldPending = previous ? parsePendingInvitePubs(previous) : new Set<string>();
+    for (const invitePub of newPending) {
+      const entry: PendingInviteIndexEntry = {
+        audIdPub,
+        slug,
+        status: "active",
+      };
+      await this.ctx.storage.put(`${PENDING_INVITE_PREFIX}${invitePub}`, entry);
+    }
+    for (const invitePub of oldPending) {
+      if (newPending.has(invitePub)) continue;
+      const entry: PendingInviteIndexEntry = {
+        audIdPub,
+        slug,
+        status: "removed",
+      };
+      await this.ctx.storage.put(`${PENDING_INVITE_PREFIX}${invitePub}`, entry);
+    }
+  }
+
+  /**
+   * Look up a kind:30520 declaration by an invite pubkey that appeared in its
+   * `fa:pending` list. Returns:
+   *   - `{status: "active", event, audIdPub, slug}` — invite still pending; declaration cached.
+   *   - `{status: "removed", audIdPub, slug}` — invite was once pending but has been claimed or rotated out (HTTP 410 territory).
+   *   - `{status: "not_found"}` — no record of this invite_pub ever being pending (HTTP 404).
+   *
+   * Backed by the `pinv:` reverse index that storeAudienceEvent maintains; if
+   * the index says the invite is active but the declaration has rotated past
+   * it (i.e. caller observed an older copy via the index window), we
+   * re-confirm against the live declaration and downgrade to `removed`.
+   */
+  async getDeclarationByInvitePub(invitePub: string): Promise<
+    | { status: "active"; event: NostrEvent; audIdPub: string; slug: string }
+    | { status: "removed"; audIdPub: string; slug: string }
+    | { status: "not_found" }
+  > {
+    if (!/^[0-9a-f]{64}$/i.test(invitePub)) return { status: "not_found" };
+    const key = `${PENDING_INVITE_PREFIX}${invitePub.toLowerCase()}`;
+    const entry = await this.ctx.storage.get<PendingInviteIndexEntry>(key);
+    if (!entry) return { status: "not_found" };
+    if (entry.status === "removed") {
+      return { status: "removed", audIdPub: entry.audIdPub, slug: entry.slug };
+    }
+    const eventKey = `${EVENT_PREFIX}30520:${entry.audIdPub}:${entry.slug}`;
+    const event = await this.ctx.storage.get<NostrEvent>(eventKey);
+    if (!event) {
+      return { status: "removed", audIdPub: entry.audIdPub, slug: entry.slug };
+    }
+    const stillPending = parsePendingInvitePubs(event);
+    if (!stillPending.has(invitePub.toLowerCase())) {
+      return { status: "removed", audIdPub: entry.audIdPub, slug: entry.slug };
+    }
+    return { status: "active", event, audIdPub: entry.audIdPub, slug: entry.slug };
   }
 
   /**
