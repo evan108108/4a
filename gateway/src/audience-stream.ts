@@ -268,9 +268,9 @@ export async function handleAudienceStreamRequest(
 
         const wraps = await stub.listGiftWraps(auth.pubkey, sinceUnix, replayLimit);
         for (const w of wraps) {
-          if (w.created_at > sinceUnix) {
-            items.push({ kind: "gift-wrap", event: w });
-          }
+          // No created_at filter here: NIP-59 backdates created_at, but the
+          // DO's listGiftWraps already filtered by server-receive time.
+          items.push({ kind: "gift-wrap", event: w });
         }
 
         const grants = await stub.listKeyGrants(auth.pubkey, sinceUnix, replayLimit);
@@ -306,7 +306,14 @@ export async function handleAudienceStreamRequest(
       if (!helloOk) return;
 
       // ── Live tail ─────────────────────────────────────────────────────
-      let cursorUnix = Math.floor(Date.now() / 1000);
+      // OVERLAP_SECONDS: how far behind wall-clock the cursor sits, so an
+      // event published in the same second as a poll cycle has a 10-second
+      // window to be re-polled. seenIds dedupes the overlap. Without this,
+      // a key-grant published microseconds before cursor advance was
+      // silently skipped (T4b ROOT CAUSE). 10s gives generous headroom for
+      // any client that might miss a single poll cycle and need to reconnect.
+      const OVERLAP_SECONDS = 10;
+      let cursorUnix = Math.floor(Date.now() / 1000) - OVERLAP_SECONDS;
       const seenIds = new Set<string>();
       let lastEpoch = decl.epoch;
       let lastDeclId = declEvent.id;
@@ -343,7 +350,11 @@ export async function handleAudienceStreamRequest(
         );
         for (const w of newWraps) {
           if (closed) return;
-          if (w.created_at <= cursorUnix) continue;
+          // Don't filter by `w.created_at` — gift-wrap created_at is
+          // NIP-59-jittered (backdated up to ~2 days for anti-correlation),
+          // so a wallclock cursor comparison silently drops legitimate new
+          // wraps. The DO's listGiftWraps already filters by server-receive
+          // time; seenIds dedupes any overlap from cursor slack.
           if (seenIds.has(w.id)) continue;
           seenIds.add(w.id);
           const ok = await emit(
@@ -361,7 +372,8 @@ export async function handleAudienceStreamRequest(
         );
         for (const g of newGrants) {
           if (closed) return;
-          if (g.created_at <= cursorUnix) continue;
+          // Same `<` boundary fix as gift-wraps above. seenIds dedupes.
+          if (g.created_at < cursorUnix) continue;
           if (seenIds.has(g.id)) continue;
           seenIds.add(g.id);
           const ok = await emit(
@@ -411,9 +423,10 @@ export async function handleAudienceStreamRequest(
         }
 
         // Bump cursor only AFTER all writes for this batch succeed, so a
-        // dropped write doesn't silently advance past unseen events.
-        // (The seenIds set is the dedup belt — cursor is the suspenders.)
-        cursorUnix = Math.floor(Date.now() / 1000);
+        // dropped write doesn't silently advance past unseen events. Cursor
+        // sits OVERLAP_SECONDS behind wall-clock (declared above) so the
+        // boundary grant published the same second as a poll gets re-polled.
+        cursorUnix = Math.floor(Date.now() / 1000) - OVERLAP_SECONDS;
 
         await new Promise((r) => setTimeout(r, config.livePollMs));
       }

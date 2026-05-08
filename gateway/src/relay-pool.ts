@@ -365,10 +365,28 @@ export class RelayPool extends DurableObject<unknown> {
     if (!/^[0-9a-f]{64}$/i.test(recipient)) {
       return { ok: false, reason: "recipient must be 32-byte hex" };
     }
-    // Pad created_at to 12 chars so lexicographic ordering matches numeric.
-    const ts = String(event.created_at).padStart(12, "0");
+    // Key by SERVER RECEIVE TIME, not the NIP-59-jittered `created_at`.
+    // NIP-59 gift-wraps deliberately backdate `created_at` by up to ~2 days
+    // for anti-correlation, so a wrap published at wallclock T can have
+    // `created_at = T - 86400`. The SSE live-tail's `sinceUnix < created_at`
+    // filter then drops every NIP-59-compliant wrap whose backdate exceeds
+    // the polling window — which is most of them. Server-receive time
+    // (Math.floor(Date.now()/1000)) reflects when this DO actually saw the
+    // wrap and is the right axis for "give me wraps since cursor X".
+    const receivedAtSec = Math.floor(Date.now() / 1000);
+    const ts = String(receivedAtSec).padStart(12, "0");
     const key = `${GIFT_WRAP_PREFIX}${recipient.toLowerCase()}:${ts}:${event.id}`;
-    await this.ctx.storage.put(key, event);
+    // Persist receivedAt alongside the event so listGiftWraps can filter
+    // without parsing the storage key on every read.
+    const stored = { ...event, _receivedAt: receivedAtSec } as NostrEvent & { _receivedAt: number };
+    await this.ctx.storage.put(key, stored);
+    console.log("[storeGiftWrap] stored", {
+      recipient: recipient.toLowerCase().slice(0, 12),
+      id: event.id.slice(0, 12),
+      created_at: event.created_at,
+      received_at: receivedAtSec,
+      jitter_seconds: receivedAtSec - event.created_at,
+    });
     return { ok: true };
   }
 
@@ -384,14 +402,37 @@ export class RelayPool extends DurableObject<unknown> {
     limit = 100,
   ): Promise<NostrEvent[]> {
     if (!/^[0-9a-f]{64}$/i.test(recipient)) return [];
-    const list = await this.ctx.storage.list<NostrEvent>({
+    const list = await this.ctx.storage.list<NostrEvent & { _receivedAt?: number }>({
       prefix: `${GIFT_WRAP_PREFIX}${recipient.toLowerCase()}:`,
     });
     const out: NostrEvent[] = [];
+    let totalSeen = 0;
+    let withReceivedAt = 0;
+    let newestReceivedAt: number | null = null;
     for (const ev of list.values()) {
-      if (sinceUnix !== undefined && ev.created_at < sinceUnix) continue;
-      out.push(ev);
+      totalSeen++;
+      const receivedAt = ev._receivedAt;
+      if (typeof receivedAt === "number") {
+        withReceivedAt++;
+        if (newestReceivedAt === null || receivedAt > newestReceivedAt) newestReceivedAt = receivedAt;
+      }
+      if (sinceUnix !== undefined && typeof receivedAt === "number" && receivedAt < sinceUnix) continue;
+      const { _receivedAt: _drop, ...clean } = ev;
+      out.push(clean as NostrEvent);
       if (out.length >= limit) break;
+    }
+    if (totalSeen > 0 || (sinceUnix !== undefined && out.length > 0)) {
+      console.log("[listGiftWraps]", {
+        recipient: recipient.toLowerCase().slice(0, 12),
+        sinceUnix: sinceUnix ?? null,
+        total_seen: totalSeen,
+        with_received_at: withReceivedAt,
+        returned: out.length,
+        newest_received_at: newestReceivedAt,
+        diff_newest_minus_since: sinceUnix !== undefined && newestReceivedAt !== null
+          ? newestReceivedAt - sinceUnix
+          : null,
+      });
     }
     return out;
   }
@@ -418,16 +459,43 @@ export class RelayPool extends DurableObject<unknown> {
       prefix: `${EVENT_PREFIX}30521:`,
     });
     const out: NostrEvent[] = [];
+    let totalSeen = 0;
+    let recipientMatches = 0;
+    let oldestCreatedAt: number | null = null;
+    let newestCreatedAt: number | null = null;
     for (const ev of list.values()) {
-      if (sinceUnix !== undefined && ev.created_at <= sinceUnix) continue;
+      totalSeen++;
       const dTag = findTag(ev.tags, "d");
       if (!dTag) continue;
       const idx = dTag.lastIndexOf(":");
       if (idx < 0) continue;
       if (dTag.slice(idx + 1).toLowerCase() !== recipientLower) continue;
+      recipientMatches++;
+      if (oldestCreatedAt === null || ev.created_at < oldestCreatedAt) oldestCreatedAt = ev.created_at;
+      if (newestCreatedAt === null || ev.created_at > newestCreatedAt) newestCreatedAt = ev.created_at;
+      // Strict `<` to include equal-timestamp boundary events. The previous
+      // `<=` was silently dropping just-published grants whose `created_at`
+      // matched the SSE live-tail cursor (Math.floor(Date.now()/1000)) —
+      // and since the cursor advanced past that timestamp on the next
+      // iteration, the grant was never visible. Caller dedupes via seenIds.
+      if (sinceUnix !== undefined && ev.created_at < sinceUnix) continue;
       out.push(ev);
     }
     out.sort((a, b) => a.created_at - b.created_at);
+    if (recipientMatches > 0 || (sinceUnix !== undefined && totalSeen > 0)) {
+      console.log("[listKeyGrants]", {
+        recipient: recipientLower.slice(0, 12),
+        sinceUnix: sinceUnix ?? null,
+        total_seen_30521: totalSeen,
+        recipient_matches: recipientMatches,
+        returned: out.length,
+        oldest: oldestCreatedAt,
+        newest: newestCreatedAt,
+        diff_newest_minus_since: sinceUnix !== undefined && newestCreatedAt !== null
+          ? newestCreatedAt - sinceUnix
+          : null,
+      });
+    }
     return out.slice(0, limit);
   }
 

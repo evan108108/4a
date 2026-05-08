@@ -189,8 +189,21 @@ async function publishAndStore(
   signed: SignedEvent,
   env: AudienceEnv,
 ): Promise<PublishOutcome> {
+  console.log("[publishAndStore] entered", {
+    kind: signed.kind,
+    id: signed.id.slice(0, 12),
+    pubkey: signed.pubkey.slice(0, 12),
+    d: signed.tags.find((t) => t[0] === "d")?.[1] ?? null,
+  });
   const acks = await fanOut(signed);
   const accepted = acks.some((r) => r.status === "accepted");
+  console.log("[publishAndStore] fanOut done", {
+    kind: signed.kind,
+    id: signed.id.slice(0, 12),
+    accepted,
+    ack_count: acks.length,
+    ack_summary: acks.map((a) => `${a.relay}:${a.status}`).join(","),
+  });
   if (!accepted) {
     console.error("[publishAndStore] not-accepted", {
       kind: signed.kind,
