@@ -96,6 +96,12 @@ export const DEFAULT_STREAM_CONFIG: StreamConfig = {
 const REPLAY_LIMIT_DEFAULT = 200;
 const REPLAY_LIMIT_MAX = 1000;
 
+// Pump self-termination caps. Belt + suspenders against a TCP-dropped client
+// where writer.write() does not throw — without these, the pump can iterate
+// indefinitely against DO storage. Whichever cap hits first exits the loop.
+const PUMP_MAX_ITERATIONS = 1800;
+const PUMP_MAX_DURATION_MS = 60 * 60 * 1000; // 1 hour
+
 type StubLike = {
   getObject(kind: number, pubkey: string, d: string): Promise<NostrEvent | null>;
   listGiftWraps(
@@ -202,6 +208,26 @@ export async function handleAudienceStreamRequest(
   const encoder = new TextEncoder();
   let closed = false;
 
+  // Client-disconnect detection. If the underlying TCP connection dies
+  // silently (no FIN, just a half-open socket the runtime later abandons),
+  // writer.write() may resolve without throwing — the pump would then iterate
+  // forever against DO storage. AbortSignal fires on cancel and lets us bail.
+  if (request.signal) {
+    request.signal.addEventListener(
+      "abort",
+      () => {
+        if (!closed) {
+          console.log("[audience-stream] abort-detected", {
+            slug,
+            caller: callerLower,
+          });
+          closed = true;
+        }
+      },
+      { once: true },
+    );
+  }
+
   async function safeWrite(chunk: string): Promise<boolean> {
     if (closed) return false;
     try {
@@ -286,8 +312,30 @@ export async function handleAudienceStreamRequest(
       let lastDeclId = declEvent.id;
       let lastKeepalive = Date.now();
       let lastEpochPoll = Date.now();
+      const pumpStartedAt = Date.now();
+      let iterations = 0;
 
       while (!closed) {
+        if (iterations >= PUMP_MAX_ITERATIONS) {
+          console.log("[audience-stream] max-iteration-hit", {
+            slug,
+            caller: callerLower,
+            iterations,
+          });
+          closed = true;
+          break;
+        }
+        if (Date.now() - pumpStartedAt >= PUMP_MAX_DURATION_MS) {
+          console.log("[audience-stream] max-duration-hit", {
+            slug,
+            caller: callerLower,
+            ms: Date.now() - pumpStartedAt,
+          });
+          closed = true;
+          break;
+        }
+        iterations++;
+
         const newWraps = await stub.listGiftWraps(
           auth.pubkey,
           cursorUnix,
