@@ -191,18 +191,50 @@ async function publishAndStore(
 ): Promise<PublishOutcome> {
   const acks = await fanOut(signed);
   const accepted = acks.some((r) => r.status === "accepted");
+  if (!accepted) {
+    console.error("[publishAndStore] not-accepted", {
+      kind: signed.kind,
+      id: signed.id,
+      pubkey: signed.pubkey,
+      d: signed.tags.find((t) => t[0] === "d")?.[1] ?? null,
+      ack_count: acks.length,
+      ack_summary: acks.map((a) => `${a.relay}:${a.status}${a.reason ? "(" + a.reason + ")" : ""}`),
+    });
+  }
   if (accepted) {
     try {
       const id = env.RELAY_POOL.idFromName("main");
       const stub = env.RELAY_POOL.get(id);
       // Cache the just-published event so subsequent route calls in the same
       // request lifetime can read the latest declaration without a relay
-      // round-trip. Best-effort — DO storage failures don't block the wire
-      // having gone out.
-      await stub.storeAudienceEvent(signed).catch(() => {});
-    } catch {
-      // ignore — cache miss just means the next /grant or /rotate will read
-      // from relays via a query rather than from the DO cache.
+      // round-trip. Storage failures used to be silently swallowed via
+      // `.catch(() => {})` AND the return value was discarded — that masked
+      // a class of "relays accepted, gateway didn't cache" bugs where
+      // listKeyGrants/listGiftWraps returned empty even though the wire
+      // succeeded. Log so the failure mode is visible in `wrangler tail`.
+      const storeResult = await stub.storeAudienceEvent(signed).catch((err) => {
+        console.error("[publishAndStore] storeAudienceEvent threw", {
+          kind: signed.kind,
+          id: signed.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return { ok: false, reason: "store_threw" } as const;
+      });
+      if (!storeResult.ok) {
+        console.error("[publishAndStore] storeAudienceEvent rejected", {
+          kind: signed.kind,
+          id: signed.id,
+          pubkey: signed.pubkey,
+          d: signed.tags.find((t) => t[0] === "d")?.[1] ?? null,
+          reason: storeResult.reason ?? "unknown",
+        });
+      }
+    } catch (err) {
+      console.error("[publishAndStore] outer catch", {
+        kind: signed.kind,
+        id: signed.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
   return { signed, acks, accepted };

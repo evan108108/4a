@@ -513,11 +513,26 @@ async function runRotate(
       relay_acks: declOut.acks,
     });
   }
-  const grantOuts: { recipient: string; event_id: string; acks: RelayResult[] }[] = [];
+  // Per-grant fan-out. Use `relay_acks` to match the field name every other
+  // route (and admit.ts in sonata-studio) reads. The previous `acks` key
+  // silently broke partial-failure detection — admit's `g.relay_acks ?? []`
+  // saw `undefined`, treated rejection as success, and never reported the
+  // partial_rotate. Surface `accepted` explicitly so callers don't re-derive.
+  const grantOuts: {
+    recipient: string;
+    event_id: string;
+    accepted: boolean;
+    relay_acks: RelayResult[];
+  }[] = [];
   for (const g of body.grants) {
     const recipient = g.tags.find((t) => t[0] === "p")?.[1] ?? "";
     const out = await publishAndStore(g, env);
-    grantOuts.push({ recipient, event_id: g.id, acks: out.acks });
+    grantOuts.push({
+      recipient,
+      event_id: g.id,
+      accepted: out.accepted,
+      relay_acks: out.acks,
+    });
   }
 
   return jsonResponse({
