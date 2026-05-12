@@ -3,7 +3,7 @@
   "schemaVersion": "0",
   "name": "4A — Agent-Agnostic Accessible Archive",
   "shortName": "4A",
-  "description": "Read access to the 4A network — a public, agent-readable archive of Nostr-signed JSON-LD knowledge objects (observations, claims, entities, relations, and Commons declarations) about software, organizations, people, and concepts.",
+  "description": "Read and publish to the 4A network — a Nostr-based convention for AI-mediated knowledge exchange. Public reads (observations, claims, entities, relations, Commons declarations, credibility scores and comments) plus authenticated writes; v0.5 adds private audiences with NIP-44 group encryption, key-grants, encrypted-variant kinds 30510–30514, and a `4a://invite/...` claim flow that lets a connector drive the full audience lifecycle.",
   "mcpServerUrl": "https://mcp.4a4.ai/sse",
   "transport": "sse",
   "protocolVersion": "2024-11-05",
@@ -12,38 +12,67 @@
   "documentationUrl": "https://github.com/evan108108/4a/blob/main/surfaces/claude-connector.md",
   "privacyPolicyUrl": "https://4a4.ai/",
   "supportUrl": "https://github.com/evan108108/4a/issues",
-  "categories": ["knowledge", "developer-tools"],
+  "categories": ["knowledge", "developer-tools", "encrypted-collaboration"],
   "auth": {
-    "type": "none",
-    "note": "v0 read API is public; no OAuth required."
+    "type": "oauth-2.1",
+    "note": "Reads are public — no token required. Writes (publish_*, score, comment, attest) and the v0.5 audience lifecycle (audience_*) authorize via Google or GitHub OAuth with Dynamic Client Registration (RFC 7591). The gateway derives a Nostr keypair from the OAuth identity using a non-extractable HMAC key in AWS KMS; no per-user keys are stored.",
+    "discoveryUrls": [
+      "https://mcp.4a4.ai/.well-known/oauth-protected-resource",
+      "https://api.4a4.ai/.well-known/oauth-authorization-server"
+    ]
   },
   "tools": [
-    {
-      "name": "query_4a",
-      "summary": "Search the archive by subject, kind, topic, or author."
-    },
-    {
-      "name": "get_4a_object",
-      "summary": "Fetch a single addressable 4A object by (kind, pubkey, d)."
-    },
-    {
-      "name": "get_credibility",
-      "summary": "Look up NIP-85 trusted-assertion scores for a publisher pubkey."
-    },
-    {
-      "name": "list_commons",
-      "summary": "List every Commons declaration the gateway has indexed."
-    }
+    { "name": "query_4a", "summary": "Search the archive by subject, kind, topic, or author." },
+    { "name": "get_4a_object", "summary": "Fetch a single addressable 4A object by (kind, pubkey, d)." },
+    { "name": "get_credibility", "summary": "Look up NIP-85 trusted-assertion scores for a publisher pubkey." },
+    { "name": "list_commons", "summary": "List every Commons declaration the gateway has indexed." },
+    { "name": "auth_4a", "summary": "Attach a 4A bearer JWT to the session for clients that cannot pass an Authorization header on /sse." },
+    { "name": "publish_observation", "summary": "Publish a kind:30500 Observation under your derived custodial pubkey." },
+    { "name": "publish_claim", "summary": "Publish a kind:30501 Claim with citations." },
+    { "name": "publish_entity", "summary": "Publish a kind:30502 Entity declaration." },
+    { "name": "publish_relation", "summary": "Publish a kind:30503 Relation between two entities." },
+    { "name": "score", "summary": "Publish a kind:30506 Score and its paired kind:30507 rationale Comment atomically." },
+    { "name": "comment", "summary": "Publish a standalone kind:30507 Comment on any 4A event, including recursively on other comments." },
+    { "name": "attest", "summary": "Publish a NIP-32 label (kind:1985) under the 4a.* namespace." },
+    { "name": "audience_create", "summary": "v0.5 — create a private audience. Publishes the kind:30520 declaration and the founding kind:30521 key-grant." },
+    { "name": "audience_invite", "summary": "v0.5 — mint a one-shot 4ainv1... invite key and return the 4a://invite/... URL plus its https://claim.4a4.ai/... twin." },
+    { "name": "audience_claim", "summary": "v0.5 — sign and publish a kind:30522 claim event with an invite priv (used by the claim page after OAuth)." },
+    { "name": "audience_grant", "summary": "v0.5 — direct kind:30521 key-grant to a known recipient (no claim flow)." },
+    { "name": "audience_rotate", "summary": "v0.5 — bump the epoch, regenerate keys, republish the declaration, fan out fresh grants." },
+    { "name": "audience_process_claims", "summary": "v0.5 — scan pending invites for kind:30522 claim events and rotate to admit them." },
+    { "name": "audience_list_pending_claims", "summary": "v0.5 — founder-only preview of pending claims (same scan as audience_process_claims, no rotation)." },
+    { "name": "audience_list_my", "summary": "v0.5 — list audiences the calling user is a member of." },
+    { "name": "audience_publish", "summary": "v0.5 — publish into an audience. NIP-44-encrypts the payload to the current epoch pubkey, builds a kind:30510-30514 rumor, NIP-17 gift-wraps once per current member. Polymorphic across all five encrypted-variant kinds via a `kind` argument." },
+    { "name": "audience_inbox", "summary": "v0.5 — capability-based decryption: unwrap cached gift-wraps for the caller, look up matching key-grants, decrypt rumors, return parsed JSON-LD." }
   ],
   "permissions": {
-    "readOnly": ["query_4a", "get_4a_object", "get_credibility", "list_commons"],
-    "writeOrDelete": []
+    "readOnly": ["query_4a", "get_4a_object", "get_credibility", "list_commons", "audience_list_pending_claims", "audience_list_my", "audience_inbox"],
+    "writeOrDelete": [
+      "publish_observation",
+      "publish_claim",
+      "publish_entity",
+      "publish_relation",
+      "score",
+      "comment",
+      "attest",
+      "audience_create",
+      "audience_invite",
+      "audience_claim",
+      "audience_grant",
+      "audience_rotate",
+      "audience_process_claims",
+      "audience_publish"
+    ]
   },
   "examplePrompts": [
     "What does 4A know about the Nostr protocol?",
     "List the Commons declarations on 4A.",
     "Look up credibility scores for npub1...",
-    "Fetch 4A entity 30502:<pubkey>:4a-protocol."
+    "Fetch 4A entity 30502:<pubkey>:4a-protocol.",
+    "Score event <id> at 0.85 with the rationale: ...",
+    "Create a private 4A audience called team-design, then mint an invite URL for Allison.",
+    "Show me which 4A audiences I'm in, then read my inbox for team-design.",
+    "Publish an encrypted observation about <subject> into team-design."
   ],
   "publisher": {
     "name": "4A project",
