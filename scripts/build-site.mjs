@@ -140,6 +140,22 @@ const PAGES = [
     section: "Credibility",
   },
   {
+    src: "SPEC-v0.5.md",
+    slug: "spec/v0.5",
+    layout: "doc",
+    title: "Specification — v0.5 (Audiences)",
+    summary: "Normative shapes for encrypted-variant kinds 30510–30514, audience declaration 30520, key-grant 30521, claim 30522, and the NIP-05 fa extension.",
+    section: "Specification",
+  },
+  {
+    src: "docs/v0.5-audiences-runbook.md",
+    slug: "docs/v0.5-audiences-runbook",
+    layout: "doc",
+    title: "v0.5 — Audiences runbook",
+    summary: "Every /v0/audience/* endpoint, every MCP tool, every CLI verb. Setup, invite flows, member rotation, and troubleshooting.",
+    section: "Surfaces",
+  },
+  {
     src: "spam-defense.md",
     slug: "spec/spam-defense",
     layout: "doc",
@@ -178,6 +194,62 @@ const PAGES = [
     title: "Privacy",
     summary: "What the hosted gateway does with your identity, what it logs, and how to revoke access.",
     section: "Reference",
+  },
+  {
+    src: "use-cases/index.md",
+    slug: "use-cases",
+    layout: "page",
+    title: "What you can build with 4A",
+    summary: "Six shapes the substrate is built for — federated workspaces, agent fabrics, peer-review networks, encrypted team memory, cross-org attestation, and social for agents.",
+    section: "Use cases",
+  },
+  {
+    src: "use-cases/federated-workspaces.md",
+    slug: "use-cases/federated-workspaces",
+    layout: "page",
+    title: "Federated team workspaces",
+    summary: "Encrypted team rooms where every member's AI sees the same shared cards. Sonata Studio is the reference app.",
+    section: "Use cases",
+  },
+  {
+    src: "use-cases/agent-fabric.md",
+    slug: "use-cases/agent-fabric",
+    layout: "page",
+    title: "Multi-machine agent fabrics",
+    summary: "Assign work to a teammate's AI by signing an event. Their machine watches the audience, picks up the card, runs the work, posts results back.",
+    section: "Use cases",
+  },
+  {
+    src: "use-cases/peer-review.md",
+    slug: "use-cases/peer-review",
+    layout: "page",
+    title: "AI peer-review networks",
+    summary: "Claims with paired rationale. Scores that don't justify themselves are weighted at zero by aggregators.",
+    section: "Use cases",
+  },
+  {
+    src: "use-cases/social-for-agents.md",
+    slug: "use-cases/social-for-agents",
+    layout: "page",
+    title: "Social networks for AI agents",
+    summary: "One signed identity across surfaces. Federated relays. No platform owner. The primitives are here; the product is yours.",
+    section: "Use cases",
+  },
+  {
+    src: "use-cases/private-team-memory.md",
+    slug: "use-cases/private-team-memory",
+    layout: "page",
+    title: "Private team memory",
+    summary: "Encrypted observations, entities, and relations scoped to an audience. Same JSON-LD shapes, audience-scoped visibility, NIP-44 v2 to the epoch pubkey.",
+    section: "Use cases",
+  },
+  {
+    src: "use-cases/cross-org-attestation.md",
+    slug: "use-cases/cross-org-attestation",
+    layout: "page",
+    title: "Cross-org attestation",
+    summary: "Verified scorers and signed claims any party can audit. NIP-05 fa extension carries policy. No platform owns the attestation graph.",
+    section: "Use cases",
   },
 ];
 
@@ -247,7 +319,7 @@ function navHTML(currentSlug) {
     const sec = p.section || "Other";
     (sectioned[sec] = sectioned[sec] || []).push(p);
   }
-  const order = ["Surfaces", "Specification", "Credibility", "Operations", "Reference", "Background", "Other"];
+  const order = ["Use cases", "Surfaces", "Specification", "Credibility", "Operations", "Reference", "Background", "Other"];
   const sections = order.filter((s) => sectioned[s]).map((sec) => {
     const items = sectioned[sec]
       .map((p) => {
@@ -313,6 +385,7 @@ function siteHeader() {
   <a href="/" class="brand"><span class="brand-mark">4A</span><span class="brand-tag">Agent-Agnostic Accessible Archive</span></a>
   <nav class="top-nav" aria-label="Site">
     <a href="/get-started/" class="top-nav-cta">Get started</a>
+    <a href="/use-cases/">Use cases</a>
     <a href="/spec/">Spec</a>
     <a href="/architecture/">Architecture</a>
     <a href="${REPO_URL}" rel="noreferrer noopener">GitHub</a>
@@ -330,6 +403,7 @@ function siteFooter() {
     <div class="footer-col">
       <h5>Read</h5>
       <ul>
+        <li><a href="/use-cases/">Use cases</a></li>
         <li><a href="/spec">Specification</a></li>
         <li><a href="/architecture">Architecture</a></li>
         <li><a href="/spec/credibility/attestations">Credibility</a></li>
@@ -1327,6 +1401,14 @@ function buildLlmsTxt(pages) {
   lines.push("");
   lines.push("4A's primitives borrow from existing systems: Nostr for wire format and identity, Schema.org and PROV-O for vocabulary, MCP for agent consumption, AT Protocol for the aggregator-relay pattern. The repository contains the full specification, reference architecture, and design research.");
   lines.push("");
+  lines.push("## Use cases");
+  lines.push("");
+  for (const p of pages) {
+    if (p.section === "Use cases") {
+      lines.push(`- [${p.title}](${SITE_URL}/${p.slug}/): ${p.summary}`);
+    }
+  }
+  lines.push("");
   lines.push("## Specification");
   lines.push("");
   for (const p of pages) {
@@ -1340,6 +1422,14 @@ function buildLlmsTxt(pages) {
   lines.push("");
   for (const p of pages) {
     if (p.section === "Credibility") {
+      lines.push(`- [${p.title}](${SITE_URL}/${p.slug}/): ${p.summary}`);
+    }
+  }
+  lines.push("");
+  lines.push("## Surfaces and runbooks");
+  lines.push("");
+  for (const p of pages) {
+    if (p.section === "Surfaces") {
       lines.push(`- [${p.title}](${SITE_URL}/${p.slug}/): ${p.summary}`);
     }
   }
