@@ -6,12 +6,15 @@
 //   kind:30520 — signed by aud_id
 //   kind:30521 — signed by caller's identity (current member) or aud_id
 //                (founding grant)
-//   kind:30510-30514 — signed by publisher identity
+//   kind:30510-30514, 30530-30536 — signed by publisher identity
 //   kind:30522 — signed by invite_priv
 //
 // The kind:30521 builder takes already-encrypted ciphertext as input — the
 // caller is responsible for NIP-44 v2-encrypting the bare epoch private key.
-// Same for kind:30510-30514: caller passes the encrypted-payload ciphertext.
+// Same for kind:30510-30514 and 30530-30536: caller passes the encrypted-
+// payload ciphertext. Kinds 30530-30536 are Sonata Studio v0 application
+// vocabulary (sonata-studio-v0-spec.md); their wire shape is identical to
+// the v0.5 encrypted variants, so they share builders + validators.
 
 import { blake3ContentTag } from "./blake3-tag";
 import type { EventTemplate } from "../kms";
@@ -20,7 +23,14 @@ export const FA_CONTEXT_V0 = "https://4a4.ai/ns/v0";
 export const KIND_AUDIENCE = 30520;
 export const KIND_KEYGRANT = 30521;
 export const KIND_CLAIM = 30522;
-export const ENCRYPTED_VARIANT_KINDS = [30510, 30511, 30512, 30513, 30514] as const;
+export const ENCRYPTED_VARIANT_KINDS = [
+  // v0.5 base encrypted variants (SPEC-v0.5 §3).
+  30510, 30511, 30512, 30513, 30514,
+  // Sonata Studio v0 vocabulary (sonata-studio-v0-spec.md). Identical wire
+  // shape to the base encrypted variants; included here so the wire builder
+  // and validator accept them.
+  30530, 30531, 30532, 30533, 30534, 30535, 30536,
+] as const;
 export type EncryptedVariantKind = (typeof ENCRYPTED_VARIANT_KINDS)[number];
 
 function nowSec(): number {

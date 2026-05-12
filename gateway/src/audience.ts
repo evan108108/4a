@@ -191,18 +191,50 @@ async function publishAndStore(
 ): Promise<PublishOutcome> {
   const acks = await fanOut(signed);
   const accepted = acks.some((r) => r.status === "accepted");
+  if (!accepted) {
+    console.error("[publishAndStore] not-accepted", {
+      kind: signed.kind,
+      id: signed.id,
+      pubkey: signed.pubkey,
+      d: signed.tags.find((t) => t[0] === "d")?.[1] ?? null,
+      ack_count: acks.length,
+      ack_summary: acks.map((a) => `${a.relay}:${a.status}${a.message ? "(" + a.message + ")" : ""}`),
+    });
+  }
   if (accepted) {
     try {
       const id = env.RELAY_POOL.idFromName("main");
       const stub = env.RELAY_POOL.get(id);
       // Cache the just-published event so subsequent route calls in the same
       // request lifetime can read the latest declaration without a relay
-      // round-trip. Best-effort — DO storage failures don't block the wire
-      // having gone out.
-      await stub.storeAudienceEvent(signed).catch(() => {});
-    } catch {
-      // ignore — cache miss just means the next /grant or /rotate will read
-      // from relays via a query rather than from the DO cache.
+      // round-trip. Storage failures used to be silently swallowed via
+      // `.catch(() => {})` AND the return value was discarded — that masked
+      // a class of "relays accepted, gateway didn't cache" bugs where
+      // listKeyGrants/listGiftWraps returned empty even though the wire
+      // succeeded. Log so the failure mode is visible in `wrangler tail`.
+      const storeResult = await stub.storeAudienceEvent(signed).catch((err) => {
+        console.error("[publishAndStore] storeAudienceEvent threw", {
+          kind: signed.kind,
+          id: signed.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return { ok: false, reason: "store_threw" } as const;
+      });
+      if (!storeResult.ok) {
+        console.error("[publishAndStore] storeAudienceEvent rejected", {
+          kind: signed.kind,
+          id: signed.id,
+          pubkey: signed.pubkey,
+          d: signed.tags.find((t) => t[0] === "d")?.[1] ?? null,
+          reason: storeResult.reason ?? "unknown",
+        });
+      }
+    } catch (err) {
+      console.error("[publishAndStore] outer catch", {
+        kind: signed.kind,
+        id: signed.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
   return { signed, acks, accepted };
@@ -661,6 +693,180 @@ async function runProcessClaims(
   });
 }
 
+// ─── /v0/audience/list-pending-claims ───────────────────────────────────────
+//
+// Founder-only read: walk the audience's current fa:pending invites and
+// surface any matching kind:30522 claim events the gateway has cached. Same
+// scan as `runProcessClaims` but stops before issuing the rotation, so the
+// inviter can preview pending claims (e.g. to show "Allison wants to join")
+// before admitting them.
+//
+// Founder-gating: requires `aud_id_priv` so callers prove they hold the
+// audience identity key, matching the rotate / process-claims pattern.
+
+interface ListPendingClaimsBody {
+  audience_address: string;
+  aud_id_priv: Uint8Array;
+}
+
+function validateListPendingClaimsBody(raw: Record<string, unknown>): ListPendingClaimsBody {
+  return {
+    audience_address: requireString(raw.audience_address, "audience_address"),
+    aud_id_priv: requireHex64Bytes(raw.aud_id_priv, "aud_id_priv"),
+  };
+}
+
+async function runListPendingClaims(
+  body: ListPendingClaimsBody,
+  env: AudienceEnv,
+): Promise<Response> {
+  const { audIdPub, slug } = requireAddress(body.audience_address, "audience_address");
+  if (pubkeyFromPriv(body.aud_id_priv) !== audIdPub) {
+    return jsonError("unauthorized", "aud_id_priv does not match audience_address", 401);
+  }
+  const cached = await lookupDeclarationByAddress(audIdPub, slug, env);
+  if (!cached) {
+    return jsonError("not_found", "audience declaration not found in relay cache", 404);
+  }
+
+  const id = env.RELAY_POOL.idFromName("main");
+  const stub = env.RELAY_POOL.get(id);
+
+  const claims: {
+    invite_pub: string;
+    claim_pubkey: string;
+    claim_event_id: string;
+    expires_at: number;
+    content: unknown;
+  }[] = [];
+  for (const pending of cached.decl.pending) {
+    const dTag = `${slug}:${cached.decl.epoch}:${pending.invitePub}`;
+    const claimEvt = await stub.getObject(30522, pending.invitePub, dTag);
+    if (!claimEvt) continue;
+    const claimPubTag = claimEvt.tags.find((t) => t[0] === "fa:claim-pubkey")?.[1];
+    if (!claimPubTag) continue;
+    const validation = validateAudienceClaimEvent(claimEvt, {
+      currentDeclarationByAddress: () => cached.decl,
+    });
+    if (!validation.ok) continue;
+    let content: unknown = claimEvt.content;
+    try {
+      content = JSON.parse(claimEvt.content);
+    } catch {
+      // leave as string
+    }
+    claims.push({
+      invite_pub: pending.invitePub,
+      claim_pubkey: claimPubTag,
+      claim_event_id: claimEvt.id,
+      expires_at: pending.expirationUnix,
+      content,
+    });
+  }
+
+  return jsonResponse({
+    ok: true,
+    audience_address: body.audience_address,
+    epoch: cached.decl.epoch,
+    pending_invite_count: cached.decl.pending.length,
+    claims,
+  });
+}
+
+// ─── /v0/audience/list-my ───────────────────────────────────────────────────
+//
+// Returns audiences the caller has access to. Implementation walks every
+// cached kind:30521 key-grant addressed to the caller's pubkey, groups by
+// (aud_id_pub, slug), and reports the highest epoch the caller holds plus a
+// role hint. Role detection is best-effort: founder = the founding grant was
+// signed by aud_id itself (rather than by another member), so we mark the
+// caller as 'founder' whenever any of their cached grants for the audience
+// have `pubkey === aud_id_pub`; otherwise 'member'.
+
+async function runListMy(claims: AuthClaims, env: AudienceEnv): Promise<Response> {
+  const identity = { provider: claims.provider, oauth_id: claims.oauth_id };
+  const { secretKey: callerPriv, publicKey: callerPub } = await deriveNostrKey(identity, env);
+  callerPriv.fill(0);
+
+  const id = env.RELAY_POOL.idFromName("main");
+  const stub = env.RELAY_POOL.get(id);
+  const grants = await stub.listKeyGrants(callerPub, undefined, 500);
+
+  // (aud_id_pub, slug) -> { latest epoch held, founder? }
+  const byAudience = new Map<string, {
+    aud_id_pub: string;
+    slug: string;
+    epoch_n: number;
+    role: "founder" | "member";
+  }>();
+  for (const g of grants) {
+    const dTag = g.tags.find((t) => t[0] === "d")?.[1];
+    if (!dTag) continue;
+    const parts = dTag.split(":");
+    if (parts.length !== 3) continue;
+    const [slug, epochStr] = parts;
+    const epoch = Number(epochStr);
+    if (!Number.isSafeInteger(epoch) || epoch < 1) continue;
+    const audIdPub = g.pubkey.toLowerCase();
+    // Best-effort: the grant's `pubkey` is the granter. The granter could be
+    // aud_id (founding case) or a member. We don't yet know which without an
+    // extra lookup; we treat the audience as one we belong to either way and
+    // resolve role below by checking against the cached declaration.
+    const key = `${audIdPub}:${slug}`;
+    const existing = byAudience.get(key);
+    if (!existing || epoch > existing.epoch_n) {
+      byAudience.set(key, { aud_id_pub: audIdPub, slug: slug ?? "", epoch_n: epoch, role: "member" });
+    }
+  }
+
+  // Resolve role + sanity-check membership against the live declaration. If
+  // the caller isn't on the declaration's member roster we drop the entry
+  // (their grant was for a stale epoch they've since been rotated out of).
+  const audiences: {
+    audience_address: string;
+    aud_id_pub: string;
+    slug: string;
+    epoch_n: number;
+    role: "founder" | "member";
+  }[] = [];
+  for (const entry of byAudience.values()) {
+    const cached = await lookupDeclarationByAddress(entry.aud_id_pub, entry.slug, env);
+    if (!cached) continue;
+    const isMember = cached.decl.members.some(
+      (m) => m.toLowerCase() === callerPub.toLowerCase(),
+    );
+    if (!isMember) continue;
+    // Founder heuristic: the declaration was signed by aud_id (its pubkey is
+    // the audience identity) and the caller was the first member to receive
+    // a grant. The wire doesn't carry a "founder" flag, so we approximate
+    // by: caller is the only original member or holds an aud_id-signed grant.
+    // For v0 keep it simple — anyone holding a grant signed by aud_id is
+    // treated as founder.
+    const founderGrant = grants.find((g) => {
+      const dTag = g.tags.find((t) => t[0] === "d")?.[1];
+      return (
+        dTag?.startsWith(`${entry.slug}:`) &&
+        g.pubkey.toLowerCase() === entry.aud_id_pub.toLowerCase()
+      );
+    });
+    audiences.push({
+      audience_address: audienceAddress(entry.aud_id_pub, entry.slug),
+      aud_id_pub: entry.aud_id_pub,
+      slug: entry.slug,
+      epoch_n: entry.epoch_n,
+      role: founderGrant ? "founder" : "member",
+    });
+  }
+
+  audiences.sort((a, b) => a.slug.localeCompare(b.slug));
+
+  return jsonResponse({
+    ok: true,
+    caller_pubkey: callerPub,
+    audiences,
+  });
+}
+
 // ─── /v0/audience/rotate ────────────────────────────────────────────────────
 
 interface RotateBody {
@@ -1038,6 +1244,33 @@ export async function handleAudienceRequest(
   const url = new URL(request.url);
   const path = url.pathname;
 
+  // GET /v0/audience/:slug/declaration?aud_id_pub=<hex> — public read for the
+  // current cached kind:30520 declaration. No auth: declarations are public
+  // Nostr events on the relay pool, so leaking content is no leak. Used by
+  // the Sonata Studio plugin's "join" flow to discover the audience identity
+  // before it has membership (chicken-and-egg with the SSE stream).
+  const declMatch = path.match(/^\/v0\/audience\/([A-Za-z0-9-]+)\/declaration$/);
+  if (declMatch) {
+    if (request.method !== "GET") {
+      return jsonError("method_not_allowed", `${request.method} not allowed`, 405);
+    }
+    const slug = declMatch[1]!;
+    const audIdPubRaw = url.searchParams.get("aud_id_pub");
+    if (!audIdPubRaw || !HEX64.test(audIdPubRaw)) {
+      return jsonError("bad_request", "aud_id_pub query param must be 32-byte hex", 400);
+    }
+    const audIdPub = audIdPubRaw.toLowerCase();
+    const cached = await lookupDeclarationByAddress(audIdPub, slug, env);
+    if (!cached) {
+      return jsonError("not_found", "audience declaration not found", 404);
+    }
+    return jsonResponse({
+      ok: true,
+      audience_address: audienceAddress(audIdPub, slug),
+      declaration: cached.event,
+    });
+  }
+
   // /v0/audience/:slug/inbox is a GET path; everything else is POST.
   const inboxMatch = path.match(/^\/v0\/audience\/([A-Za-z0-9-]+)\/inbox$/);
   if (inboxMatch) {
@@ -1097,6 +1330,12 @@ export async function handleAudienceRequest(
     if (path === "/v0/audience/process-claims") {
       return await runProcessClaims(validateProcessClaimsBody(raw), claims, env);
     }
+    if (path === "/v0/audience/list-pending-claims") {
+      return await runListPendingClaims(validateListPendingClaimsBody(raw), env);
+    }
+    if (path === "/v0/audience/list-my") {
+      return await runListMy(claims, env);
+    }
     if (path === "/v0/audience/publish") {
       return await runAudiencePublish(validateAudiencePublishBody(raw), claims, env);
     }
@@ -1145,6 +1384,8 @@ export const __audienceRoutes = {
   runRotate,
   runAudiencePublish,
   runProcessClaims,
+  runListPendingClaims,
+  runListMy,
   runInbox,
   validateCreateBody,
   validateInviteBody,
@@ -1153,4 +1394,5 @@ export const __audienceRoutes = {
   validateRotateBody,
   validateAudiencePublishBody,
   validateProcessClaimsBody,
+  validateListPendingClaimsBody,
 };

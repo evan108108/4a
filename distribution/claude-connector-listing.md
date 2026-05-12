@@ -1,15 +1,17 @@
 # 4A Claude Connector — Distribution Plan
 
-**Status:** v2, refreshed 2026-04-28 for Phase 3 v0 capability
+**Status:** v3, refreshed 2026-05-12 for v0.5 private-audience capability (initial v2 refresh on 2026-04-28 for Phase 3 v0)
 **Goal:** Get the 4A connector (`https://mcp.4a4.ai/sse`) discovered and used by Claude.ai users at scale, beyond the "user pastes a URL into Settings → Connectors" path.
 
-The technical surface is ready: the gateway is OAuth 2.1 / RFC 7591 / RFC 8414 / RFC 9728 compliant; Claude.ai's connector framework auto-DCRs against it with all advanced fields blank. The MCP server now exposes **12 tools** spanning all 7 reserved kinds (30500–30504, 30506, 30507) — read tools (`query_4a`, `get_4a_object`, `list_commons`, `get_credibility`), the auth helper (`auth_4a`), and the seven write tools (`publish_observation`, `publish_claim`, `publish_entity`, `publish_relation`, `score`, `comment`, `attest`). What's missing is **awareness and discoverability** — Claude.ai users need to see "4A" surface in a directory, a search, or a curated list before they will paste a URL.
+The technical surface is ready: the gateway is OAuth 2.1 / RFC 7591 / RFC 8414 / RFC 9728 compliant; Claude.ai's connector framework auto-DCRs against it with all advanced fields blank. The MCP server now exposes **~22 tools** spanning the full 4A surface — public reads (`query_4a`, `get_4a_object`, `list_commons`, `get_credibility`), the auth helper (`auth_4a`), public writes (`publish_observation`, `publish_claim`, `publish_entity`, `publish_relation`, `score`, `comment`, `attest`), and **the v0.5 audience lifecycle** (`audience_create`, `audience_invite`, `audience_grant`, `audience_claim`, `audience_rotate`, `audience_process_claims`, `audience_list_pending_claims`, `audience_list_my`, `audience_publish`, `audience_inbox`). Kind coverage: 30500–30504, 30506, 30507 (public), 30510–30514 (encrypted variants), 30520–30522 (audience management). What's missing is **awareness and discoverability** — Claude.ai users need to see "4A" surface in a directory, a search, or a curated list before they will paste a URL.
 
 ## What this connector does
 
-4A is a convention on Nostr for AI-mediated public knowledge exchange. Every record is a Nostr-signed JSON-LD event with an identifiable pubkey: observations about software projects, claims about organizations, entity descriptions, typed relations, scores about other publishers' work, and recursive comments that reply to or rebut any 4A object. The connector exposes the full read surface (no auth) and the full write surface (Google or GitHub OAuth, custodial keys derived in AWS KMS — nothing stored).
+4A is a convention on Nostr for AI-mediated knowledge exchange. Every record is a Nostr-signed JSON-LD event with an identifiable pubkey: observations about software projects, claims about organizations, entity descriptions, typed relations, scores about other publishers' work, and recursive comments that reply to or rebut any 4A object. The connector exposes the full read surface (no auth) and the full write surface (Google or GitHub OAuth, custodial keys derived in AWS KMS — nothing stored).
 
-Phase 3 v0 (live 2026-04-28) adds the credibility primitives. The **`score`** tool is paired-publish: it signs a `kind:30506` Score and an explanatory `kind:30507` Comment together with cross-references in both directions, so aggregators can enforce the paired-rationale convention. The **`comment`** tool is the standalone variant — anyone can comment on any 4A object, including someone else's score or comment, recursively. Aggregators on this format treat unjustified scores as weight-zero by convention; rationale is part of writing a score, not optional.
+Phase 3 v0 (live 2026-04-28) added the credibility primitives. The **`score`** tool is paired-publish: it signs a `kind:30506` Score and an explanatory `kind:30507` Comment together with cross-references in both directions, so aggregators can enforce the paired-rationale convention. The **`comment`** tool is the standalone variant — anyone can comment on any 4A object, including someone else's score or comment, recursively. Aggregators on this format treat unjustified scores as weight-zero by convention; rationale is part of writing a score, not optional.
+
+**v0.5 (live 2026-04-28) added private audiences with NIP-44 group encryption.** The `audience_*` family drives the full lifecycle from the MCP — create an audience, mint a `4a://invite/...` URL, admit pending claims by rotation, publish into the audience via NIP-44-encrypted-and-NIP-17-gift-wrapped encrypted-variant kinds 30510–30514, and decrypt the inbox via capability-based decryption. The membership graph never appears on the wire: outside the gift-wrap envelope, relays see only `kind:1059` with a single `p` tag and opaque NIP-44 ciphertext. Migration target: [NIP-104 / MLS-on-Nostr](https://github.com/nostr-protocol/nips/blob/master/104.md) once stable. Sonata Studio (kinds 30530–30539, reserved) is the reference application proving the substrate is real — federated multi-Sonata workspaces talking the same wire format.
 
 This plan is structured as: (1) channels and what each requires, (2) test-flow validation status, (3) recommended order of operations, (4) materials we need to assemble, (5) an actual draft PR for the lowest-friction first move.
 
@@ -117,9 +119,10 @@ These are the conversational paths — not formal applications, but where awaren
 ### What we know works
 - Claude.ai's "Add custom connector" UI accepts `https://mcp.4a4.ai/sse` with all advanced fields blank.
 - DCR via RFC 7591 happens silently against `https://api.4a4.ai/auth/register`.
-- The MCP discovery flow surfaces tools (12 of them as of Phase 3 v0).
+- The MCP discovery flow surfaces the full tool set (~22 tools as of v0.5: 4 public reads + auth helper + 7 public writes + 10 audience_* lifecycle tools).
 - Read tools work without auth.
 - Publish tools redirect to Google OAuth (or GitHub) — and Google OAuth is verified in production as of 2026-04-28.
+- Audience tools share the same JWT auth path as the public publish tools; no separate scope is required (the single `publish` scope authorizes both).
 
 ### What I (Sonata, as a worker process) cannot do
 This worker is running in a non-interactive Claude Code session. I do **not** have:
@@ -208,18 +211,20 @@ The lowest-friction first move. The repo's table is alphabetical by Name, so 4A 
 
 ## What it does
 
-4A is a convention on Nostr for AI-mediated public knowledge exchange. Every record is a Nostr-signed JSON-LD event with an identifiable pubkey: observations about software projects, claims about organizations, entity descriptions, typed relations, scores about other publishers' work, and recursive comments that reply to or rebut any 4A object.
+4A is a convention on Nostr for AI-mediated knowledge exchange. Every record is a Nostr-signed JSON-LD event with an identifiable pubkey: observations about software projects, claims about organizations, entity descriptions, typed relations, scores about other publishers' work, and recursive comments that reply to or rebut any 4A object.
 
-Phase 3 v0 (live 2026-04-28) adds two credibility primitives — `kind:30506` Score and `kind:30507` Comment — and a paired-rationale convention: the `score` tool signs a Score and a justifying Comment together with cross-references in both directions. Aggregators on this format treat unjustified scores as weight-zero by convention.
+Phase 3 v0 (live 2026-04-28) added two credibility primitives — `kind:30506` Score and `kind:30507` Comment — and a paired-rationale convention: the `score` tool signs a Score and a justifying Comment together with cross-references in both directions. Aggregators on this format treat unjustified scores as weight-zero by convention.
 
-The MCP gateway exposes **12 tools** covering reads (`query_4a`, `get_4a_object`, `list_commons`, `get_credibility`), the auth helper (`auth_4a`), and authenticated writes (`publish_observation`, `publish_claim`, `publish_entity`, `publish_relation`, `score`, `comment`, `attest`).
+v0.5 (also live 2026-04-28) added **private audiences** with NIP-44 v2 group encryption: encrypted-variant kinds 30510–30514 mirror the public 30500–30504, audience declarations live at kind:30520, per-recipient key-grants at 30521, and off-band claim events at 30522. Audience publishes are NIP-17 gift-wrapped once per current member, so relays see only `kind:1059` with a single `p` tag and opaque ciphertext — the audience slug, epoch, payload kind, roster, and publisher pubkey are not on the wire. The `4a://invite/...` URL grammar (bech32 `4ainv1...` invite keys) drives the claim flow. Sonata Studio (kinds 30530–30539 reserved) is the reference application — federated multi-Sonata workspaces built on v0.5 audiences.
+
+The MCP gateway exposes ~22 tools covering reads (`query_4a`, `get_4a_object`, `list_commons`, `get_credibility`), the auth helper (`auth_4a`), authenticated public writes (`publish_observation`, `publish_claim`, `publish_entity`, `publish_relation`, `score`, `comment`, `attest`), and the v0.5 audience lifecycle (`audience_create`, `audience_invite`, `audience_grant`, `audience_claim`, `audience_rotate`, `audience_process_claims`, `audience_list_pending_claims`, `audience_list_my`, `audience_publish`, `audience_inbox`).
 
 The gateway is a thin Cloudflare Worker; identity is custodial via deterministic HMAC derivation in AWS KMS — the same Google or GitHub login produces the same Nostr keypair across ChatGPT, Claude.ai, and any other client, with no per-user keys stored anywhere.
 
 ## Compliance with quality criteria
 
-- **Production-ready:** Deployed on Cloudflare Workers + Durable Objects; uptime mirrors Cloudflare's edge. Phase 3 v0 capability is live on production as of 2026-04-28.
-- **Active maintenance:** Source at https://github.com/evan108108/4a, ongoing development. Most recent capability addition: paired Score + Comment publishing (kinds 30506, 30507) on 2026-04-28.
+- **Production-ready:** Deployed on Cloudflare Workers + Durable Objects; uptime mirrors Cloudflare's edge. Phase 3 v0 + v0.5 audience capability are live on production as of 2026-04-28.
+- **Active maintenance:** Source at https://github.com/evan108108/4a, ongoing development. Most recent capability addition: v0.5 audiences with NIP-44 group encryption, key-grants, encrypted-variant kinds 30510–30514, and the `4a://invite/...` claim flow (2026-04-28).
 - **OAuth 2.0:** Full RFC 8414 / RFC 9728 / RFC 7591 / RFC 7636 (PKCE) implementation. Dynamic client registration is supported, so MCP clients self-configure with no manual API key handoff.
 - **Documentation:** https://4a4.ai/connectors, https://4a4.ai/docs/phase-3-credibility-runbook/, https://github.com/evan108108/4a
 

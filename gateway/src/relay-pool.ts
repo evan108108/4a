@@ -72,6 +72,17 @@ const EVENT_PREFIX = "event:";
 const COMMONS_PREFIX = "event:30504:";
 const RECONNECT_PREFIX = "reconnect:";
 const RETRY_PREFIX = "retry:";
+// Reverse index: invite_pub → {audIdPub, slug, status}. Maintained by
+// storeAudienceEvent for kind:30520 declarations so the public
+// /v0/audience/by-invite-pub/<pub> route can resolve a declaration without
+// scanning every cached audience.
+const PENDING_INVITE_PREFIX = "pinv:";
+
+interface PendingInviteIndexEntry {
+  audIdPub: string;
+  slug: string;
+  status: "active" | "removed";
+}
 
 export interface NostrEvent {
   id: string;
@@ -119,6 +130,23 @@ function findTag(tags: string[][], name: string): string | undefined {
 function findTagValues(tags: string[][], name: string): string[] {
   const out: string[] = [];
   for (const t of tags) if (t[0] === name && typeof t[1] === "string") out.push(t[1]);
+  return out;
+}
+
+// Parse the set of invite pubkeys present in a kind:30520 declaration's
+// `fa:pending` tags. Tag format per audience-validator.ts:
+//   ["fa:pending", "<invite_pub_hex>:<expiration_unix>"]
+function parsePendingInvitePubs(event: NostrEvent): Set<string> {
+  const out = new Set<string>();
+  for (const t of event.tags) {
+    if (t[0] !== "fa:pending") continue;
+    const v = t[1];
+    if (typeof v !== "string") continue;
+    const idx = v.indexOf(":");
+    if (idx < 0) continue;
+    const pub = v.slice(0, idx).toLowerCase();
+    if (/^[0-9a-f]{64}$/.test(pub)) out.add(pub);
+  }
   return out;
 }
 
@@ -238,7 +266,80 @@ export class RelayPool extends DurableObject<unknown> {
       return { ok: true, reason: "superseded by existing newer event" };
     }
     await this.ctx.storage.put(key, event);
+    if (event.kind === 30520) {
+      await this.updatePendingInviteIndex(existing ?? null, event);
+    }
     return { ok: true };
+  }
+
+  /**
+   * Maintain the `pinv:<invite_pub>` reverse index for kind:30520
+   * declarations. Pending invite_pubs in the new declaration are written as
+   * `active`; pubs that disappeared from the previous declaration's pending
+   * list (claim consumed or rotation removed them) are marked `removed` so
+   * downstream readers can return 410 instead of 404.
+   */
+  private async updatePendingInviteIndex(
+    previous: NostrEvent | null,
+    next: NostrEvent,
+  ): Promise<void> {
+    const audIdPub = next.pubkey.toLowerCase();
+    const slug = findTag(next.tags, "d") ?? "";
+    const newPending = parsePendingInvitePubs(next);
+    const oldPending = previous ? parsePendingInvitePubs(previous) : new Set<string>();
+    for (const invitePub of newPending) {
+      const entry: PendingInviteIndexEntry = {
+        audIdPub,
+        slug,
+        status: "active",
+      };
+      await this.ctx.storage.put(`${PENDING_INVITE_PREFIX}${invitePub}`, entry);
+    }
+    for (const invitePub of oldPending) {
+      if (newPending.has(invitePub)) continue;
+      const entry: PendingInviteIndexEntry = {
+        audIdPub,
+        slug,
+        status: "removed",
+      };
+      await this.ctx.storage.put(`${PENDING_INVITE_PREFIX}${invitePub}`, entry);
+    }
+  }
+
+  /**
+   * Look up a kind:30520 declaration by an invite pubkey that appeared in its
+   * `fa:pending` list. Returns:
+   *   - `{status: "active", event, audIdPub, slug}` — invite still pending; declaration cached.
+   *   - `{status: "removed", audIdPub, slug}` — invite was once pending but has been claimed or rotated out (HTTP 410 territory).
+   *   - `{status: "not_found"}` — no record of this invite_pub ever being pending (HTTP 404).
+   *
+   * Backed by the `pinv:` reverse index that storeAudienceEvent maintains; if
+   * the index says the invite is active but the declaration has rotated past
+   * it (i.e. caller observed an older copy via the index window), we
+   * re-confirm against the live declaration and downgrade to `removed`.
+   */
+  async getDeclarationByInvitePub(invitePub: string): Promise<
+    | { status: "active"; event: NostrEvent; audIdPub: string; slug: string }
+    | { status: "removed"; audIdPub: string; slug: string }
+    | { status: "not_found" }
+  > {
+    if (!/^[0-9a-f]{64}$/i.test(invitePub)) return { status: "not_found" };
+    const key = `${PENDING_INVITE_PREFIX}${invitePub.toLowerCase()}`;
+    const entry = await this.ctx.storage.get<PendingInviteIndexEntry>(key);
+    if (!entry) return { status: "not_found" };
+    if (entry.status === "removed") {
+      return { status: "removed", audIdPub: entry.audIdPub, slug: entry.slug };
+    }
+    const eventKey = `${EVENT_PREFIX}30520:${entry.audIdPub}:${entry.slug}`;
+    const event = await this.ctx.storage.get<NostrEvent>(eventKey);
+    if (!event) {
+      return { status: "removed", audIdPub: entry.audIdPub, slug: entry.slug };
+    }
+    const stillPending = parsePendingInvitePubs(event);
+    if (!stillPending.has(invitePub.toLowerCase())) {
+      return { status: "removed", audIdPub: entry.audIdPub, slug: entry.slug };
+    }
+    return { status: "active", event, audIdPub: entry.audIdPub, slug: entry.slug };
   }
 
   /**
@@ -264,10 +365,28 @@ export class RelayPool extends DurableObject<unknown> {
     if (!/^[0-9a-f]{64}$/i.test(recipient)) {
       return { ok: false, reason: "recipient must be 32-byte hex" };
     }
-    // Pad created_at to 12 chars so lexicographic ordering matches numeric.
-    const ts = String(event.created_at).padStart(12, "0");
+    // Key by SERVER RECEIVE TIME, not the NIP-59-jittered `created_at`.
+    // NIP-59 gift-wraps deliberately backdate `created_at` by up to ~2 days
+    // for anti-correlation, so a wrap published at wallclock T can have
+    // `created_at = T - 86400`. The SSE live-tail's `sinceUnix < created_at`
+    // filter then drops every NIP-59-compliant wrap whose backdate exceeds
+    // the polling window — which is most of them. Server-receive time
+    // (Math.floor(Date.now()/1000)) reflects when this DO actually saw the
+    // wrap and is the right axis for "give me wraps since cursor X".
+    const receivedAtSec = Math.floor(Date.now() / 1000);
+    const ts = String(receivedAtSec).padStart(12, "0");
     const key = `${GIFT_WRAP_PREFIX}${recipient.toLowerCase()}:${ts}:${event.id}`;
-    await this.ctx.storage.put(key, event);
+    // Persist receivedAt alongside the event so listGiftWraps can filter
+    // without parsing the storage key on every read.
+    const stored = { ...event, _receivedAt: receivedAtSec } as NostrEvent & { _receivedAt: number };
+    await this.ctx.storage.put(key, stored);
+    console.log("[storeGiftWrap] stored", {
+      recipient: recipient.toLowerCase().slice(0, 12),
+      id: event.id.slice(0, 12),
+      created_at: event.created_at,
+      received_at: receivedAtSec,
+      jitter_seconds: receivedAtSec - event.created_at,
+    });
     return { ok: true };
   }
 
@@ -283,16 +402,101 @@ export class RelayPool extends DurableObject<unknown> {
     limit = 100,
   ): Promise<NostrEvent[]> {
     if (!/^[0-9a-f]{64}$/i.test(recipient)) return [];
-    const list = await this.ctx.storage.list<NostrEvent>({
+    const list = await this.ctx.storage.list<NostrEvent & { _receivedAt?: number }>({
       prefix: `${GIFT_WRAP_PREFIX}${recipient.toLowerCase()}:`,
     });
     const out: NostrEvent[] = [];
+    let totalSeen = 0;
+    let withReceivedAt = 0;
+    let newestReceivedAt: number | null = null;
     for (const ev of list.values()) {
-      if (sinceUnix !== undefined && ev.created_at < sinceUnix) continue;
-      out.push(ev);
+      totalSeen++;
+      const receivedAt = ev._receivedAt;
+      if (typeof receivedAt === "number") {
+        withReceivedAt++;
+        if (newestReceivedAt === null || receivedAt > newestReceivedAt) newestReceivedAt = receivedAt;
+      }
+      if (sinceUnix !== undefined && typeof receivedAt === "number" && receivedAt < sinceUnix) continue;
+      const { _receivedAt: _drop, ...clean } = ev;
+      out.push(clean as NostrEvent);
       if (out.length >= limit) break;
     }
+    if (totalSeen > 0 || (sinceUnix !== undefined && out.length > 0)) {
+      console.log("[listGiftWraps]", {
+        recipient: recipient.toLowerCase().slice(0, 12),
+        sinceUnix: sinceUnix ?? null,
+        total_seen: totalSeen,
+        with_received_at: withReceivedAt,
+        returned: out.length,
+        newest_received_at: newestReceivedAt,
+        diff_newest_minus_since: sinceUnix !== undefined && newestReceivedAt !== null
+          ? newestReceivedAt - sinceUnix
+          : null,
+      });
+    }
     return out;
+  }
+
+  /**
+   * Fetch cached kind:30521 key-grants where the recipient (last segment of
+   * the d-tag, `<slug>:<epoch>:<recipient>`) matches `recipient`. Optional
+   * `sinceUnix` filters to grants with `created_at > sinceUnix`. Returns up
+   * to `limit` events, oldest-first.
+   *
+   * Implementation: scans the `event:30521:*` keyspace and filters by
+   * d-tag suffix. Acceptable at v0 scale; if the audience grant table grows
+   * past O(thousands), revisit by adding a per-recipient secondary index
+   * mirrored from storeAudienceEvent.
+   */
+  async listKeyGrants(
+    recipient: string,
+    sinceUnix?: number,
+    limit = 100,
+  ): Promise<NostrEvent[]> {
+    if (!/^[0-9a-f]{64}$/i.test(recipient)) return [];
+    const recipientLower = recipient.toLowerCase();
+    const list = await this.ctx.storage.list<NostrEvent>({
+      prefix: `${EVENT_PREFIX}30521:`,
+    });
+    const out: NostrEvent[] = [];
+    let totalSeen = 0;
+    let recipientMatches = 0;
+    let oldestCreatedAt: number | null = null;
+    let newestCreatedAt: number | null = null;
+    for (const ev of list.values()) {
+      totalSeen++;
+      const dTag = findTag(ev.tags, "d");
+      if (!dTag) continue;
+      const idx = dTag.lastIndexOf(":");
+      if (idx < 0) continue;
+      if (dTag.slice(idx + 1).toLowerCase() !== recipientLower) continue;
+      recipientMatches++;
+      if (oldestCreatedAt === null || ev.created_at < oldestCreatedAt) oldestCreatedAt = ev.created_at;
+      if (newestCreatedAt === null || ev.created_at > newestCreatedAt) newestCreatedAt = ev.created_at;
+      // Strict `<` to include equal-timestamp boundary events. The previous
+      // `<=` was silently dropping just-published grants whose `created_at`
+      // matched the SSE live-tail cursor (Math.floor(Date.now()/1000)) —
+      // and since the cursor advanced past that timestamp on the next
+      // iteration, the grant was never visible. Caller dedupes via seenIds.
+      if (sinceUnix !== undefined && ev.created_at < sinceUnix) continue;
+      out.push(ev);
+    }
+    out.sort((a, b) => a.created_at - b.created_at);
+    if (recipientMatches > 0 || (sinceUnix !== undefined && totalSeen > 0)) {
+      console.log("[listKeyGrants]", {
+        recipient: recipientLower.slice(0, 12),
+        sinceUnix: sinceUnix ?? null,
+        total_seen_30521: totalSeen,
+        recipient_matches: recipientMatches,
+        returned: out.length,
+        oldest: oldestCreatedAt,
+        newest: newestCreatedAt,
+        diff_newest_minus_since: sinceUnix !== undefined && newestCreatedAt !== null
+          ? newestCreatedAt - sinceUnix
+          : null,
+      });
+    }
+    return out.slice(0, limit);
   }
 
   async listCommons(): Promise<NostrEvent[]> {

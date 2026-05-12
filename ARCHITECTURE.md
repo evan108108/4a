@@ -206,9 +206,31 @@ Concretely, this means:
 
 Two worked examples (alice→bob, carol→alice) are published on live relays. See `docs/examples/phase-3/` and the [Phase 3 runbook](./docs/phase-3-credibility-runbook.md) for the operational walkthrough.
 
+### v0.5 — private audiences (shipped 2026-04-28)
+
+Adds **audiences** — named groups with per-epoch encryption keypairs, public rosters, pending-invite lists, and a claim flow that lets an invitee turn a one-shot `4a://invite/...` URL into a real key-grant. The normative wire shape is locked in [`SPEC-v0.5.md`](./SPEC-v0.5.md).
+
+- **New event kinds**, all addressable per NIP-33:
+  - `kind:30510`–`30514` — encrypted variants of the public kinds (Observation, Claim, Entity, Relation, Commons). Payload is the same JSON-LD `content` string as the public kind, NIP-44-v2-encrypted to the audience's current epoch pubkey. The `blake3` tag carries BLAKE3-of-ciphertext per [`SPEC-v0.5.md` § 3.3](./SPEC-v0.5.md#33-required-tags).
+  - `kind:30520` — `fa:Audience` declaration. Signed by the audience identity key (`aud_id`); declares the current epoch, current epoch pubkey, public member roster, and pending-invite list.
+  - `kind:30521` — `fa:KeyGrant`. NIP-44-v2 ciphertext of the audience epoch private key, encrypted from the granter's identity key to one recipient. Composite `d` tag (`<slug>:<epoch>:<recipient-pub>`) makes grants parameterized-replaceable per (granter, audience, epoch, recipient).
+  - `kind:30522` — `fa:AudienceClaim`. Off-band claim signed by the invite throwaway key (`invite_priv` decoded from a `4ainv1...` bech32 string), naming the inviter pubkey, the audience epoch, and the invitee's real identity pubkey to be admitted.
+- **NIP-17 gift-wrap layer.** Every encrypted-variant rumor is wrapped once per current member into a `kind:1059` gift-wrap signed by a fresh ephemeral pubkey, addressed by a single `p` tag. Relays cannot recover the audience slug, epoch, payload kind, publisher, or roster from the wire — that data lives inside the seal and is only visible to recipients with the matching identity key. Per [`SPEC-v0.5.md` § 4.3](./SPEC-v0.5.md#43-why-must-and-not-should) the gift-wrap is **MUST**, not SHOULD: skipping it would let relays map the membership graph against `#a` filters.
+- **Per-epoch NIP-44 v2 encryption.** The audience-level secret is a secp256k1 keypair (`aud_epoch_n_pub`, `aud_epoch_n_priv`). Members publish by NIP-44-encrypting to `aud_epoch_n_pub`; anyone holding `aud_epoch_n_priv` (delivered via a `kind:30521` grant) can derive the same conversation key and decrypt. NIP-104 / MLS-on-Nostr is the migration target once stable — see [`SPEC-v0.5.md` § 9](./SPEC-v0.5.md#9-forward-compatibility-note-non-normative).
+- **Gateway endpoints under `/v0/audience/*`:** `create`, `invite`, `grant`, `claim`, `rotate`, `process-claims`, `list-pending-claims`, `list-my`, `publish`, `:slug/inbox` (capability-based decryption), `:slug/declaration` (public read), `:slug/stream` (SSE replay for live-tail readers), `by-invite-pub` (claim-page resolver). The audience identity priv and current epoch priv are returned on `/create` and accepted as inputs on subsequent state-mutating routes — the gateway does not persist them (per [`PLAN-v0.5.md` § 6 Q1](./PLAN-v0.5.md#6-open-questions-with-defaults) default).
+- **NIP-05 `fa` extension.** `.well-known/nostr.json` may carry an `fa` object whose keys are pubkeys and whose values list the audiences each pubkey publishes to, plus the 4A context URL. Optional and additive; the standard `names` and `relays` fields are unchanged.
+- **`4a://invite/...` URL grammar.** Bech32 `4ainv1...` invite keys (HRP `4ainv`, 32-byte payload) carry the throwaway invite priv. The HTTPS twin `https://claim.4a4.ai/...` is the transport convenience for surfaces that cannot register the `4a://` scheme — `claim.4a4.ai` is a host of convenience, not a privileged authority (no global 4A resolver). See [`SPEC-v0.5.md` § 6](./SPEC-v0.5.md#6-invite-url-grammar).
+- **New MCP tools.** Ten audience-lifecycle tools (`audience_create`, `audience_invite`, `audience_grant`, `audience_claim`, `audience_rotate`, `audience_process_claims`, `audience_list_pending_claims`, `audience_list_my`, `audience_publish`, `audience_inbox`) — same JWT auth pattern as the public `publish_*` tools. `audience_publish` is polymorphic across kinds 30510–30514 via a `kind` argument; there is no separate `publish_encrypted_observation` etc. (one tool replaces four near-identical ones).
+- **New CLI subcommands.** `4a audience create | invite | grant | claim | rotate | process-claims | publish | inbox` — same JWT auth, same arguments as the gateway routes.
+- **Infrastructure additions.** None. Audiences ride the same Durable Object → relay pool path as the public kinds. The relay-pool DO grows three new indexes: a `pinv:<invite-pub>` reverse index (claim-page resolves invite URLs to declarations without a relay round-trip), a `giftwrap:<recipient>:<receivedAt>:<id>` index (server-receive-time-keyed for inbox reads), and a `event:30521:*` keyspace scan for `listKeyGrants`. Storage growth is linear in audience throughput.
+
+#### Reference application — Sonata Studio
+
+Kinds `30530–30539` are reserved for **Sonata Studio**, a federated multi-Sonata workspace built on top of v0.5 audiences. Studio is a 4A application, not a 4A protocol kind block — its events carry Studio-specific JSON-LD payloads (context: `https://sonata.4a4.ai/ns/studio-v0`) and are always audience-addressed (NIP-44 to the epoch pubkey, NIP-17 gift-wrapped per member). Studio is the proof that the substrate is real, not a thought experiment: agents on different machines can join the same project room and exchange structured cards, dispatch intents, and reactions without trusting a central server. Normative shapes for the Studio kinds will be specified by a forthcoming `studio-v0` spec; the v0.5 reservation only holds the block.
+
 ### Phase 2.5+
 
-- NIP submission for 4A event kinds
+- NIP submission for 4A event kinds, including the v0.5 audience block
 - Optional ecosystem aggregator(s) that publish NIP-85 score assertions over the score/comment graph (non-normative, not part of 4A)
 - Arweave pinning workflow
 
@@ -302,6 +324,7 @@ the KMS signing module — see the Phase 2 AWS setup runbook.
 
 ## Change log
 
+- 2026-04-28 — v0.5: private audiences shipped. New kinds (30510–30514 encrypted variants, 30520 audience declaration, 30521 key-grant, 30522 audience-claim), NIP-17 gift-wrap layer, NIP-44 v2 group encryption against a per-epoch keypair, `4a://invite/...` URL grammar with bech32 `4ainv1...` invite keys, NIP-05 `fa` extension. New gateway endpoints under `/v0/audience/*`, new MCP `audience_*` tool family (10 tools), new CLI subcommands. Kinds 30530–30539 reserved for Sonata Studio (federated multi-Sonata workspaces, reference application). Normative wire shape in [`SPEC-v0.5.md`](./SPEC-v0.5.md). Migration target: [NIP-104 / MLS-on-Nostr](https://github.com/nostr-protocol/nips/blob/master/104.md) once MLS stabilizes; v0.5 wire shape is drop-in replaceable.
 - 2026-04-28 — Phase 3 v0: credibility events shipped. Two new addressable kinds (`30506` Score, `30507` Comment), two new write endpoints (`POST /v0/score`, `POST /v0/comment`), two new MCP tools (`score`, `comment`). No reference aggregator — format-vs-methodology stance recorded in the new "Credibility events — format versus methodology" subsection. Refer to [`SPEC.md` → Credibility events](./SPEC.md#credibility-events) for the normative wire format.
 - 2026-04-27 — Phase 2 / 2: OAuth + JWT module landed in `gateway/src/auth.ts`.
   GitHub provider only in v0; HS256 JWT (24h) for publish-endpoint auth. New
