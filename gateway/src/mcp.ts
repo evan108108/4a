@@ -570,6 +570,32 @@ const TOOLS: ToolDef[] = [
     },
     examples: [],
   },
+  {
+    name: "audience_list_pending_claims",
+    description:
+      "Founder-only preview of pending claims on an audience. Walks the audience's current fa:pending invites, returns any kind:30522 claim events the gateway has cached (each item carries invite_pub, claim_pubkey, claim_event_id, expires_at, and the claim's parsed JSON-LD content). Same scan as audience_process_claims but stops before rotating — useful for showing the founder who wants in before they admit anyone.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        audience_address: { type: "string", description: "30520:<aud_id-hex>:<slug>" },
+        aud_id_priv: { type: "string", description: "Audience identity priv (32-byte hex; proves founder)" },
+      },
+      required: ["audience_address", "aud_id_priv"],
+      additionalProperties: false,
+    },
+    examples: [],
+  },
+  {
+    name: "audience_list_my",
+    description:
+      "List audiences the calling user is a member of. Returns one entry per audience the caller holds a current key-grant for, with { audience_address, aud_id_pub, slug, epoch_n, role: 'founder' | 'member' }. Role is best-effort: 'founder' marks audiences whose key-grants to the caller were signed by the audience identity key itself; 'member' is the default. Uses the caller's identity from the authenticated session — no extra inputs.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+    examples: [{ name: "audience_list_my", arguments: {} }],
+  },
 ];
 
 function getPool(env: McpEnv): DurableObjectStub<RelayPool> {
@@ -619,6 +645,8 @@ async function callTool(
     case "audience_publish":
     case "audience_inbox":
     case "audience_process_claims":
+    case "audience_list_pending_claims":
+    case "audience_list_my":
       return runAudienceTool(name, args, env, session);
     default:
       throw rpcError(METHOD_NOT_FOUND, `unknown tool: ${name}`);
@@ -697,6 +725,15 @@ async function runAudienceTool(
       case "audience_process_claims": {
         const body = __audienceRoutes.validateProcessClaimsBody(args);
         resp = await __audienceRoutes.runProcessClaims(body, session.claims, env);
+        break;
+      }
+      case "audience_list_pending_claims": {
+        const body = __audienceRoutes.validateListPendingClaimsBody(args);
+        resp = await __audienceRoutes.runListPendingClaims(body, env);
+        break;
+      }
+      case "audience_list_my": {
+        resp = await __audienceRoutes.runListMy(session.claims, env);
         break;
       }
       case "audience_inbox": {
