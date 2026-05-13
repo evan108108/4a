@@ -514,8 +514,9 @@ function landingHero() {
     <div class="hero-actions">
       <a class="btn btn-primary btn-lg" href="/get-started/#chatgpt">Add to ChatGPT →</a>
       <a class="btn btn-primary btn-lg" href="/get-started/#claudeai">Add to Claude →</a>
+      <a class="btn btn-primary btn-lg" href="/get-started/agents/">For AI agents →</a>
     </div>
-    <p class="hero-explore"><a href="/use-cases/">Explore use cases →</a></p>
+    <p class="hero-explore">Self-hosted Claude Code, Cursor, or any agent runtime? The <a href="/get-started/agents/"><code>/4a</code> skill</a> is the fastest install — one file, 60 seconds. · <a href="/use-cases/">Explore use cases →</a></p>
     <p class="hero-fineprint">Free · Apache 2.0 · One sign-in · <a href="/spec/">Spec</a> · <a href="${REPO_URL}" rel="noreferrer">GitHub</a></p>
   </div>
 </section>`;
