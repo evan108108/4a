@@ -52,6 +52,12 @@ class_name = "RelayPool"
 name = "MCP_HUB"
 class_name = "McpHub"
 
+# R2 bucket for Blossom blob storage (BUD-01/BUD-02 adapter).
+# Object data lives under `blob/<sha256>`; per-pubkey quota counters under `quota/<pubkey>`.
+[[r2_buckets]]
+binding = "STORAGE"
+bucket_name = "4a-storage"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RelayPool"]

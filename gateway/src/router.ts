@@ -23,6 +23,7 @@ import { handleAudienceRequest } from "./audience";
 import { handleAudienceByInvitePubRequest } from "./audience-by-invite-pub";
 import { handleAudienceRawRequest } from "./audience-raw";
 import { handleAudienceStreamRequest } from "./audience-stream";
+import { handleBlossomRequest } from "./blossom";
 import { handleCommentRequest } from "./comment";
 import { handleMcpRequest } from "./mcp";
 import type { McpHub } from "./mcp";
@@ -46,6 +47,7 @@ interface Env {
   AWS_REGION: string;
   KMS_DERIVATION_KEY_ID: string;
   NOSTR_DIRECTORY_JSON?: string;
+  STORAGE: R2Bucket;
 }
 
 const CONTEXT_HEADERS: HeadersInit = {
@@ -83,6 +85,9 @@ export default {
       }
       if (url.pathname === "/v0/comment") {
         return handleCommentRequest(request, env);
+      }
+      if (url.pathname.startsWith("/blossom/")) {
+        return handleBlossomRequest(request, env);
       }
       if (url.pathname.startsWith("/v0/audience/raw/")) {
         return handleAudienceRawRequest(request, env);
