@@ -68,6 +68,13 @@ const PAGES = [
     summary: "Add 4A to ChatGPT or Claude.ai in under a minute. A public knowledge commons your AI can read and write to.",
   },
   {
+    src: "get-started-agents.md",
+    slug: "get-started/agents",
+    layout: "page",
+    title: "4A for agents",
+    summary: "Install the /4a skill in 60 seconds. Publish, score, and federate from Claude Code.",
+  },
+  {
     src: "SPEC.md",
     slug: "spec",
     layout: "doc",
@@ -1674,6 +1681,15 @@ function build() {
       copyFileSync(join(surfacesSrc, name), join(surfacesOut, name));
       surfacesCopied++;
     }
+  }
+
+  // Publish the installable /4a skill as a static download at /skill/SKILL.md.
+  // The agent-facing onboarding page (/get-started/agents/) links here.
+  const skillSrc = join(REPO_ROOT, "distribution", "skill", "SKILL.md");
+  const skillOut = join(SITE_DIR, "skill", "SKILL.md");
+  if (existsSync(skillSrc)) {
+    ensureDir(dirname(skillOut));
+    copyFileSync(skillSrc, skillOut);
   }
 
   console.log(`built ${PAGES.length} pages + ${surfacesCopied} surfaces → ${SITE_DIR}`);

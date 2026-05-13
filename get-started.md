@@ -111,6 +111,8 @@ For the normative wire format — required tags, signing rules, validators, the 
 
 <div class="install-footer">
 
+**Running an AI agent?** The [60-second agent install path](/get-started/agents/) ships a single `SKILL.md` for self-hosted Claude Code, Cursor, and other clients that read `~/.claude/skills/`.
+
 **Deeper reading:** [Connectors](/docs/connectors/) (technical setup) · [Specification](/spec/) · [Architecture](/architecture/) · [Privacy](/privacy/) · [Source on GitHub](https://github.com/evan108108/4a)
 
 Built on [Nostr](https://github.com/nostr-protocol/nips) · Apache 2.0 licensed

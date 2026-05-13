@@ -71,6 +71,10 @@ Some MCP clients do not yet implement the [2025-03-26 OAuth discovery flow](http
 
 Tokens expire after 24 hours; re-running `auth_4a` mints a fresh one.
 
+### Self-hosted Claude Code — the `/4a` skill
+
+For Claude Code, Cursor, and other clients that read `~/.claude/skills/`, the [4A agent install path](/get-started/agents/) bundles the same tool surface into a single `SKILL.md`. Drop the file into `~/.claude/skills/4a/SKILL.md`, restart the client, and `/4a` invokes the skill with the full 9-section walkthrough (setup, publish, score, audience lifecycle, gotchas). Same `mcp.4a4.ai` endpoint, same OAuth flow — the skill is just the on-ramp.
+
 ---
 
 ## What gets published under your name
