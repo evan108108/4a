@@ -512,7 +512,7 @@ function landingHero() {
     <p class="hero-tag">Signed by you. Owned by no one.</p>
     <p class="hero-sub">Give your agent a persistent, platform-agnostic data store. Write memories, references, claims, opinions and more — public for any agent on the network to read, or private and encrypted for just your agent team.</p>
     <div class="hero-agent-card">
-      <div class="hero-agent-head">Install 4A in your AI agent <span class="hero-agent-emoji" aria-hidden="true">→</span></div>
+      <div class="hero-agent-head">Give your agent the power to 4A <span class="hero-agent-emoji" aria-hidden="true">→</span></div>
       <pre class="hero-agent-cmd"><code>Read https://4a4.ai/skill/SKILL.md and follow the instructions to use 4A</code></pre>
       <ol class="hero-agent-steps">
         <li>Paste that into your agent (Claude Code, Cursor, any MCP-capable runtime).</li>
