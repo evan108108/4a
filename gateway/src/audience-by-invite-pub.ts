@@ -1,7 +1,7 @@
 // GET /v0/audience/by-invite-pub/<invite_pub_hex>
 //
 // Public read used by the Sonata Studio plugin's `studio_room_join` flow to
-// resolve an invite URL of the form `4a://invite/<slug>/<epoch>?k=<priv>`
+// resolve an invite URL of the form `s4a://invite/<slug>/<epoch>?k=<priv>`
 // into a (declaration, aud_id_pub, slug) triple. The new URL format omits
 // `aud_id_pub` from the path — the plugin derives `invite_pub` from the
 // invite priv and asks the gateway to look up the declaration that lists

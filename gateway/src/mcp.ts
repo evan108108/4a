@@ -459,7 +459,7 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: "audience_invite",
-    description: "Generate a one-shot 4ainv1… invite key, republish the audience declaration with a new fa:pending tag, and return the 4a:// + claim.4a4.ai URLs to share off-band.",
+    description: "Generate a one-shot 4ainv1… invite key, republish the audience declaration with a new fa:pending tag, and return the s4a:// + claim.4a4.ai URLs to share off-band.",
     inputSchema: {
       type: "object",
       properties: {
