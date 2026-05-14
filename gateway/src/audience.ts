@@ -73,6 +73,10 @@ import { validateKeyGrantEvent } from "./keygrant-validator";
 import { validateAudienceClaimEvent } from "./audience-claim-validator";
 import { validateEncryptedVariantEvent } from "./encrypted-variant-validator";
 import { validateGiftWrapEvent } from "./gift-wrap-validator";
+import {
+  loadAudienceStatus as loadAudienceStatusGuard,
+  rejectIfClosed as rejectIfClosedGuard,
+} from "./audience-closed-guard";
 import type { NostrEvent, RelayPool } from "./relay-pool";
 import { fanOut, rateLimitCheck, type RelayResult } from "./publish";
 
@@ -390,6 +394,11 @@ async function runInvite(body: InviteBody, env: AudienceEnv): Promise<Response> 
   if (!cached) {
     return jsonError("not_found", "audience declaration not found in relay cache", 404);
   }
+  const closed = rejectIfClosedGuard(
+    await loadAudienceStatusGuard(audIdPub, slug, env),
+    "invite",
+  );
+  if (closed) return closed;
 
   // Generate the invite keypair.
   const invitePriv = randomBytes(32);
@@ -476,6 +485,11 @@ async function runGrant(
   if (pubkeyFromPriv(body.aud_id_priv) !== audIdPub) {
     return jsonError("unauthorized", "aud_id_priv does not match audience_address", 401);
   }
+  const closedGrant = rejectIfClosedGuard(
+    await loadAudienceStatusGuard(audIdPub, slug, env),
+    "grant",
+  );
+  if (closedGrant) return closedGrant;
   const cached = await lookupDeclarationByAddress(audIdPub, slug, env);
   if (!cached) {
     return jsonError("not_found", "audience declaration not found in relay cache", 404);
@@ -572,6 +586,14 @@ function validateClaimBody(raw: Record<string, unknown>): ClaimBody {
 
 async function runClaim(body: ClaimBody, env: AudienceEnv): Promise<Response> {
   const { audIdPub, slug } = requireAddress(body.audience_address, "audience_address");
+  // Gateway-signed /claim only emits join claims (no leave path); rejecting
+  // when the room is closed mirrors the raw-side guard for runClaim with
+  // status != "left".
+  const closed = rejectIfClosedGuard(
+    await loadAudienceStatusGuard(audIdPub, slug, env),
+    "claim",
+  );
+  if (closed) return closed;
   const decoded = decodeInviteKey(body.invite_priv_4ainv);
   if (!decoded.ok) {
     return jsonError("bad_request", `invalid invite_priv_4ainv: ${decoded.error.kind}`, 400);
@@ -904,6 +926,11 @@ async function runRotate(
   if (pubkeyFromPriv(body.aud_id_priv) !== audIdPub) {
     return jsonError("unauthorized", "aud_id_priv does not match audience_address", 401);
   }
+  const closed = rejectIfClosedGuard(
+    await loadAudienceStatusGuard(audIdPub, slug, env),
+    "rotate",
+  );
+  if (closed) return closed;
   const cached = await lookupDeclarationByAddress(audIdPub, slug, env);
   if (!cached) {
     return jsonError("not_found", "audience declaration not found in relay cache", 404);
@@ -1020,6 +1047,11 @@ async function runAudiencePublish(
   env: AudienceEnv,
 ): Promise<Response> {
   const { audIdPub, slug } = requireAddress(body.audience_address, "audience_address");
+  const closed = rejectIfClosedGuard(
+    await loadAudienceStatusGuard(audIdPub, slug, env),
+    "publish",
+  );
+  if (closed) return closed;
   const cached = await lookupDeclarationByAddress(audIdPub, slug, env);
   if (!cached) {
     return jsonError("not_found", "audience declaration not found in relay cache", 404);

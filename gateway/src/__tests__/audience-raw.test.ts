@@ -637,6 +637,261 @@ describe("handleAudienceRawRequest — /claim wellformed without cache", () => {
   });
 });
 
+// Closed-room guard wiring — verifies that the raw routes refuse mutating
+// operations when the cached kind:30520 carries fa:status=closed. The guard
+// itself is unit-tested in audience-closed-guard.test.ts; here we only
+// confirm each route reaches that path. See sonata-studio-room-lifecycle §5.
+describe("handleAudienceRawRequest — closed-room guard", () => {
+  /** Seed a closed kind:30520 declaration into the stub cache. */
+  function seedClosedRoom(
+    slug: string,
+    stub: StubDO,
+    founderPub: string,
+  ): { audId: { priv: Uint8Array; pub: string }; declaration: SignedEvent } {
+    const audId = makeKeypair();
+    const epoch = makeKeypair();
+    const declTpl = buildAudienceDeclaration({
+      audIdPub: audId.pub,
+      slug,
+      name: slug,
+      epoch: 1,
+      epochPub: epoch.pub,
+      members: [founderPub],
+    });
+    declTpl.tags.push(["fa:status", "closed"]);
+    declTpl.tags.push(["fa:closed-at", String(Math.floor(Date.now() / 1000))]);
+    const declaration = signEventWithRawKey(declTpl, audId.priv);
+    stub.events.set(`30520:${audId.pub.toLowerCase()}:${slug}`, declaration);
+    return { audId, declaration };
+  }
+
+  it("/grant on a closed room returns 403 closed_room", async () => {
+    const { env, stub } = makeStubEnv();
+    const founder = makeKeypair();
+    const { audId } = seedClosedRoom("closed-room", stub, founder.pub);
+    const grantTpl = buildKeyGrant({
+      audIdPub: audId.pub,
+      slug: "closed-room",
+      epoch: 1,
+      recipientPub: founder.pub,
+      ciphertext: fakeNip44V2Ciphertext(),
+    });
+    const grant = signEventWithRawKey(grantTpl, founder.priv);
+    const url = "https://api.4a4.ai/v0/audience/raw/grant";
+    const req = makeRequest(
+      url,
+      "POST",
+      {
+        audience_address: `30520:${audId.pub}:closed-room`,
+        grant,
+      },
+      founder.priv,
+    );
+    const res = await handleAudienceRawRequest(req, env);
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string; operation: string };
+    expect(body.error).toBe("closed_room");
+    expect(body.operation).toBe("grant");
+  });
+
+  it("/publish-wraps on a closed room returns 403 closed_room", async () => {
+    const { env, stub } = makeStubEnv();
+    const founder = makeKeypair();
+    const { audId } = seedClosedRoom("closed-wraps", stub, founder.pub);
+    const wrapTpl = {
+      kind: 1059,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [["p", founder.pub]],
+      content: fakeNip44V2Ciphertext(),
+    };
+    const ephemeral = makeKeypair();
+    const wrap = signEventWithRawKey(wrapTpl, ephemeral.priv);
+    const url = "https://api.4a4.ai/v0/audience/raw/publish-wraps";
+    const req = makeRequest(
+      url,
+      "POST",
+      {
+        audience_address: `30520:${audId.pub}:closed-wraps`,
+        gift_wraps: [wrap],
+      },
+      founder.priv,
+    );
+    const res = await handleAudienceRawRequest(req, env);
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("closed_room");
+  });
+
+  it("/claim with fa:status=left passes the closed-room guard", async () => {
+    const { env, stub } = makeStubEnv();
+    const founder = makeKeypair();
+    const { audId } = seedClosedRoom("closed-leave", stub, founder.pub);
+    // Build a leave claim: signing pubkey == claim-pubkey, d-tag with the
+    // "left:" segment per §4.2. The validator dispatch added in step 3 will
+    // accept this; here we only verify the guard does NOT reject up-front.
+    // (validateAudienceClaimEvent will reject because the d-tag shape isn't
+    // the legacy join form, but the status before that is what we test.)
+    const leaveTpl = {
+      kind: 30522,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ["d", `closed-leave:1:left:${founder.pub}`],
+        ["fa:context", "https://4a4.ai/ns/v0"],
+        ["alt", "leave audience closed-leave epoch 1"],
+        ["a", `30520:${audId.pub}:closed-leave`],
+        ["fa:epoch", "1"],
+        ["fa:status", "left"],
+        ["fa:claim-pubkey", founder.pub],
+      ],
+      content: JSON.stringify({
+        "@context": "https://4a4.ai/ns/v0",
+        "@type": "AudienceClaim",
+        audience: "closed-leave",
+        epoch: 1,
+        claimPubkey: founder.pub,
+        status: "left",
+      }),
+    };
+    const leave = signEventWithRawKey(leaveTpl, founder.priv);
+    const url = "https://api.4a4.ai/v0/audience/raw/claim";
+    const req = makeRequest(
+      url,
+      "POST",
+      {
+        audience_address: `30520:${audId.pub}:closed-leave`,
+        claim: leave,
+      },
+      founder.priv,
+    );
+    const res = await handleAudienceRawRequest(req, env);
+    // The guard passes (no 403 closed_room); validator may still reject for
+    // d-tag shape, which is a separate concern wired up in step 3.
+    expect(res.status).not.toBe(403);
+    if (res.status === 400) {
+      const body = (await res.json()) as { error: string };
+      expect(body.error).not.toBe("closed_room");
+    }
+  });
+});
+
+// Tests for the new /v0/audience/raw/publish-declaration route added by the
+// closed-room work (used by boot / close / reopen in later steps).
+describe("handleAudienceRawRequest — /publish-declaration", () => {
+  it("rejects when declaration.pubkey != aud_id", async () => {
+    const { env, stub } = makeStubEnv();
+    const founder = makeKeypair();
+    const room = buildRoom("pubd-room", founder.pub);
+    await stub.storeAudienceEvent(room.declaration);
+    // Craft a declaration signed by a wrong key.
+    const wrongSigner = makeKeypair();
+    const tpl = buildAudienceDeclaration({
+      audIdPub: room.audId.pub,
+      slug: "pubd-room",
+      name: "pubd-room",
+      epoch: 1,
+      epochPub: room.epochPub,
+      members: [founder.pub],
+    });
+    const bad = signEventWithRawKey(tpl, wrongSigner.priv);
+    const url = "https://api.4a4.ai/v0/audience/raw/publish-declaration";
+    const req = makeRequest(
+      url,
+      "POST",
+      {
+        audience_address: `30520:${room.audId.pub}:pubd-room`,
+        declaration: bad,
+      },
+      founder.priv,
+    );
+    const res = await handleAudienceRawRequest(req, env);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { message: string };
+    expect(body.message).toMatch(/signed by aud_id/);
+  });
+
+  it("publishes a re-signed declaration for boot/close/reopen", async () => {
+    const { env, stub } = makeStubEnv();
+    const founder = makeKeypair();
+    const room = buildRoom("pubd-ok", founder.pub);
+    await stub.storeAudienceEvent(room.declaration);
+    // Re-emit with fa:status=closed (founder closing the room).
+    const tpl = buildAudienceDeclaration({
+      audIdPub: room.audId.pub,
+      slug: "pubd-ok",
+      name: "pubd-ok",
+      epoch: 1,
+      epochPub: room.epochPub,
+      members: [founder.pub],
+    });
+    tpl.tags.push(["fa:status", "closed"]);
+    tpl.tags.push(["fa:closed-at", String(Math.floor(Date.now() / 1000))]);
+    tpl.created_at = room.declaration.created_at + 1;
+    const closedDecl = signEventWithRawKey(tpl, room.audId.priv);
+    const url = "https://api.4a4.ai/v0/audience/raw/publish-declaration";
+    const req = makeRequest(
+      url,
+      "POST",
+      {
+        audience_address: `30520:${room.audId.pub}:pubd-ok`,
+        declaration: closedDecl,
+      },
+      founder.priv,
+    );
+    const res = await handleAudienceRawRequest(req, env);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: true; declaration_event_id: string };
+    expect(body.declaration_event_id).toBe(closedDecl.id);
+  });
+
+  it("rejects roster changes while the audience remains closed", async () => {
+    const { env, stub } = makeStubEnv();
+    const founder = makeKeypair();
+    const other = makeKeypair();
+    // Seed an already-closed declaration with one member.
+    const audId = makeKeypair();
+    const epochKp = makeKeypair();
+    const closedTpl = buildAudienceDeclaration({
+      audIdPub: audId.pub,
+      slug: "locked",
+      name: "locked",
+      epoch: 1,
+      epochPub: epochKp.pub,
+      members: [founder.pub],
+    });
+    closedTpl.tags.push(["fa:status", "closed"]);
+    closedTpl.tags.push(["fa:closed-at", String(Math.floor(Date.now() / 1000))]);
+    const closedSigned = signEventWithRawKey(closedTpl, audId.priv);
+    await stub.storeAudienceEvent(closedSigned);
+    // Attempt to publish a new closed declaration that adds another member.
+    const reshapeTpl = buildAudienceDeclaration({
+      audIdPub: audId.pub,
+      slug: "locked",
+      name: "locked",
+      epoch: 1,
+      epochPub: epochKp.pub,
+      members: [founder.pub, other.pub],
+    });
+    reshapeTpl.tags.push(["fa:status", "closed"]);
+    reshapeTpl.tags.push(["fa:closed-at", String(Math.floor(Date.now() / 1000))]);
+    reshapeTpl.created_at = closedSigned.created_at + 1;
+    const reshape = signEventWithRawKey(reshapeTpl, audId.priv);
+    const url = "https://api.4a4.ai/v0/audience/raw/publish-declaration";
+    const req = makeRequest(
+      url,
+      "POST",
+      {
+        audience_address: `30520:${audId.pub}:locked`,
+        declaration: reshape,
+      },
+      founder.priv,
+    );
+    const res = await handleAudienceRawRequest(req, env);
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("closed_room_roster_locked");
+  });
+});
+
 // Sanity: helpers above use the shared fakeNip44V2Ciphertext; this guards
 // against accidental decoding by the structural check.
 describe("test helpers", () => {

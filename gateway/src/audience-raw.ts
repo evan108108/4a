@@ -41,6 +41,11 @@ import {
 import { validateKeyGrantEvent } from "./keygrant-validator";
 import { validateAudienceClaimEvent } from "./audience-claim-validator";
 import { validateGiftWrapEvent } from "./gift-wrap-validator";
+import {
+  loadAudienceStatus,
+  rejectIfClosed,
+  readAudienceStatus,
+} from "./audience-closed-guard";
 import { verifyNip98 } from "./lib/nip98";
 import type { NostrEvent, RelayPool } from "./relay-pool";
 import { fanOut, rateLimitCheck, type RelayResult } from "./publish";
@@ -396,6 +401,11 @@ async function runGrant(
   if (!cached) {
     return jsonError("not_found", "audience declaration not found", 404);
   }
+  const closed = rejectIfClosed(
+    await loadAudienceStatus(audIdPub, slug, env),
+    "grant",
+  );
+  if (closed) return closed;
 
   // Caller must sign the grant (current member issuing a grant).
   if (body.grant.pubkey.toLowerCase() !== callerPubkey.toLowerCase()) {
@@ -475,6 +485,14 @@ async function runRotate(
   env: AudienceRawEnv,
 ): Promise<Response> {
   const { audIdPub, slug } = requireAddress(body.audience_address, "audience_address");
+
+  // Rotating a closed room is forbidden. Reopen-then-rotate is a separate
+  // two-step sequence by the founder.
+  const closed = rejectIfClosed(
+    await loadAudienceStatus(audIdPub, slug, env),
+    "rotate",
+  );
+  if (closed) return closed;
 
   // Declaration must be signed by aud_id.
   if (body.declaration.pubkey.toLowerCase() !== audIdPub.toLowerCase()) {
@@ -572,6 +590,13 @@ async function runInvite(
 ): Promise<Response> {
   const { audIdPub, slug } = requireAddress(body.audience_address, "audience_address");
 
+  // Cannot mint invites for a closed room.
+  const closed = rejectIfClosed(
+    await loadAudienceStatus(audIdPub, slug, env),
+    "invite",
+  );
+  if (closed) return closed;
+
   if (body.declaration.pubkey.toLowerCase() !== audIdPub.toLowerCase()) {
     return jsonError(
       "bad_request",
@@ -644,6 +669,19 @@ async function runClaim(
 ): Promise<Response> {
   const { audIdPub, slug } = requireAddress(body.audience_address, "audience_address");
   const cached = await lookupDeclarationByAddress(audIdPub, slug, env);
+
+  // Closed-room guard: reject join claims, allow leave claims (a member of a
+  // closed room may still record their departure).
+  const claimStatus = body.claim.tags.find((t) => t[0] === "fa:status")?.[1];
+  const isLeave = claimStatus === "left";
+  if (!isLeave) {
+    const closed = rejectIfClosed(
+      await loadAudienceStatus(audIdPub, slug, env),
+      "claim",
+    );
+    if (closed) return closed;
+  }
+
   // Claim validation works without the cached declaration too — but if we
   // have it, the lookup catches "this invite_pub is no longer pending" at
   // request time.
@@ -743,6 +781,11 @@ async function runPublishWraps(
   if (!cached) {
     return jsonError("not_found", "audience declaration not found", 404);
   }
+  const closed = rejectIfClosed(
+    await loadAudienceStatus(audIdPub, slug, env),
+    "publish-wraps",
+  );
+  if (closed) return closed;
 
   const memberSet = new Set(cached.decl.members.map((m) => m.toLowerCase()));
 
@@ -780,6 +823,97 @@ async function runPublishWraps(
   });
 }
 
+// ─── /v0/audience/raw/publish-declaration ──────────────────────────────────
+
+interface PublishDeclarationBody {
+  audience_address: string;
+  declaration: SignedEvent;
+}
+
+function parsePublishDeclarationBody(
+  raw: Record<string, unknown>,
+): PublishDeclarationBody {
+  return {
+    audience_address: requireString(raw.audience_address, "audience_address"),
+    declaration: requireSignedEvent(raw.declaration, "declaration"),
+  };
+}
+
+/**
+ * Publish a re-signed kind:30520 declaration without minting key-grants or
+ * invites. Used by the Studio room-lifecycle plumbing for boot / close /
+ * reopen: roster + status changes that don't rotate the epoch.
+ *
+ * Auth is the Schnorr signature on the kind:30520 — `declaration.pubkey` must
+ * equal the audience identity (`audIdPub`) from `audience_address`, and the
+ * sig is verified via `validateAudienceEvent` (which `requireSignedEvent`
+ * already runs structurally; `validateAudienceEvent` additionally enforces
+ * the cross-event "identity key never rotates" invariant). The NIP-98 wrapper
+ * authenticates the caller for rate-limiting, but the route-level admin gate
+ * is the audience-identity signature itself — consistent with runRotate /
+ * runInvite, which similarly trust the inner declaration's signer.
+ */
+async function runPublishDeclaration(
+  _callerPubkey: string,
+  body: PublishDeclarationBody,
+  env: AudienceRawEnv,
+): Promise<Response> {
+  const { audIdPub, slug } = requireAddress(body.audience_address, "audience_address");
+
+  if (body.declaration.pubkey.toLowerCase() !== audIdPub.toLowerCase()) {
+    return jsonError(
+      "bad_request",
+      "declaration must be signed by aud_id (audience_address pubkey)",
+      400,
+    );
+  }
+  const declCheck = validateAudienceEvent(body.declaration);
+  if (!declCheck.ok) {
+    return jsonError("bad_request", `declaration invalid: ${declCheck.error}`, 400);
+  }
+  const parsed = parseAudienceDeclaration(body.declaration);
+  if (!parsed.ok) {
+    return jsonError("bad_request", `declaration parse failed: ${parsed.error}`, 400);
+  }
+  if (parsed.value.slug !== slug) {
+    return jsonError("bad_request", "declaration slug does not match audience_address", 400);
+  }
+
+  // Status-transition check: a closed room may be reopened (status flips to
+  // active), or re-closed idempotently with the same roster, but its roster
+  // cannot be reshaped while still closed.
+  const prior = await loadAudienceStatus(audIdPub, slug, env);
+  const next = readAudienceStatus(body.declaration);
+  if (prior && prior.status === "closed" && next.status === "closed") {
+    const priorMembers = prior.declaration.members.map((m) => m.toLowerCase()).sort();
+    const nextMembers = parsed.value.members.map((m) => m.toLowerCase()).sort();
+    const rosterChanged =
+      priorMembers.length !== nextMembers.length ||
+      priorMembers.some((m, i) => m !== nextMembers[i]);
+    if (rosterChanged) {
+      return jsonError(
+        "closed_room_roster_locked",
+        "cannot reshape roster while audience is closed; reopen first",
+        403,
+      );
+    }
+  }
+
+  const out = await publishAndStore(body.declaration, env);
+  if (!out.accepted) {
+    return jsonError("relay_failure", "no relays accepted the declaration", 502, {
+      relay_acks: out.acks,
+    });
+  }
+
+  return jsonResponse({
+    ok: true,
+    audience_address: audienceAddress(audIdPub, slug),
+    declaration_event_id: body.declaration.id,
+    relay_acks: out.acks,
+  });
+}
+
 // ─── router ────────────────────────────────────────────────────────────────
 
 type RawRoute = (
@@ -798,6 +932,8 @@ const ROUTES: Record<string, RawRoute> = {
     runProcessClaims(pk, parseProcessClaimsBody(raw), env),
   "/v0/audience/raw/publish-wraps": (pk, raw, env) =>
     runPublishWraps(pk, parsePublishWrapsBody(raw), env),
+  "/v0/audience/raw/publish-declaration": (pk, raw, env) =>
+    runPublishDeclaration(pk, parsePublishDeclarationBody(raw), env),
 };
 
 export async function handleAudienceRawRequest(
@@ -871,6 +1007,7 @@ export const __audienceRawInternals = {
   runClaim,
   runProcessClaims,
   runPublishWraps,
+  runPublishDeclaration,
   parseCreateBody,
   parseGrantBody,
   parseRotateBody,
@@ -878,6 +1015,7 @@ export const __audienceRawInternals = {
   parseClaimBody,
   parseProcessClaimsBody,
   parsePublishWrapsBody,
+  parsePublishDeclarationBody,
   requireSignedEvent,
 };
 
