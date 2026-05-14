@@ -6,7 +6,7 @@
 //                                kind:30520 + founding kind:30521.
 //   POST /v0/audience/invite   — generate (invite_priv, invite_pub),
 //                                republish 30520 with new fa:pending,
-//                                return 4a:// + claim.4a4.ai URLs.
+//                                return s4a:// + claim.4a4.ai URLs.
 //   POST /v0/audience/grant    — direct kind:30521 grant to a known pubkey
 //                                + republish declaration with the new member.
 //   POST /v0/audience/claim    — sign + publish kind:30522 with invite_priv
@@ -417,12 +417,12 @@ async function runInvite(body: InviteBody, env: AudienceEnv): Promise<Response> 
   }
 
   const inviteKey = encodeInviteKey(invitePriv);
-  const fourAUrl = `4a://invite/${slug}/${cached.decl.epoch}?k=${inviteKey}`;
+  const s4aUrl = `s4a://invite/${slug}/${cached.decl.epoch}?k=${inviteKey}`;
   const httpsUrl = `${HTTPS_CLAIM_BASE}/invite/${slug}/${cached.decl.epoch}?k=${inviteKey}`;
 
   return jsonResponse({
     ok: true,
-    four_a_url: fourAUrl,
+    s4a_url: s4aUrl,
     https_url: httpsUrl,
     invite_pub: invitePub,
     invite_priv_4ainv: inviteKey,

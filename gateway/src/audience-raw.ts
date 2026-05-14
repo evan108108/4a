@@ -609,12 +609,12 @@ async function runInvite(
     });
   }
 
-  const fourAUrl = `4a://invite/${slug}/${parsed.value.epoch}?k=${body.invite_priv_4ainv}`;
+  const s4aUrl = `s4a://invite/${slug}/${parsed.value.epoch}?k=${body.invite_priv_4ainv}`;
   const httpsUrl = `${HTTPS_CLAIM_BASE}/invite/${slug}/${parsed.value.epoch}?k=${body.invite_priv_4ainv}`;
 
   return jsonResponse({
     ok: true,
-    four_a_url: fourAUrl,
+    s4a_url: s4aUrl,
     https_url: httpsUrl,
     invite_pub: body.invite_pub,
     invite_priv_4ainv: body.invite_priv_4ainv,
