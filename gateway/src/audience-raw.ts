@@ -690,6 +690,17 @@ async function runClaim(
     : {};
   const claimCheck = validateAudienceClaimEvent(body.claim, lookup);
   if (!claimCheck.ok) {
+    // Special-case the leave-while-booted race (§5.4): if the leaving
+    // member is no longer in the roster, surface 403 not_current_member so
+    // the renderer can map this to a "you were already removed" toast
+    // rather than a generic validation failure.
+    if (isLeave && claimCheck.error === "not_current_member") {
+      return jsonError(
+        "not_current_member",
+        "leaving member is not in the current declaration's roster",
+        403,
+      );
+    }
     return jsonError("bad_request", `claim invalid: ${claimCheck.error}`, 400);
   }
 
