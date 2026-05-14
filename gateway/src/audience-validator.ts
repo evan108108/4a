@@ -56,6 +56,18 @@ export interface AudienceDeclaration {
   members: string[];
   /** Outstanding pending invite pubkeys (parsed from `fa:pending`). */
   pending: { invitePub: string; expirationUnix: number }[];
+  /**
+   * Room lifecycle status from `fa:status` (sonata-studio-room-lifecycle.md
+   * §4.1). Absence means "active"; only "closed" is significant. Unknown
+   * values fall back to "active" so future status flavors don't break the
+   * legacy guard.
+   */
+  status: "active" | "closed";
+  /**
+   * Unix-seconds timestamp at which the founder closed the room. Parsed
+   * from `fa:closed-at`; only meaningful when `status === "closed"`.
+   */
+  closedAt?: number;
 }
 
 function findTag(tags: string[][], name: string): string | undefined {
@@ -173,17 +185,31 @@ export function parseAudienceDeclaration(
     return { ok: false, error: "content.epoch must equal the fa:epoch tag" };
   }
 
-  return {
-    ok: true,
-    value: {
-      audIdPub: event.pubkey,
-      slug: dTag,
-      epoch,
-      epochPub,
-      members,
-      pending,
-    },
+  // Room-lifecycle status tags (fa:status, fa:closed-at). Absence ≡ active
+  // per §3.1; unknown values likewise fall back to active so the validator
+  // stays permissive for forward-compat.
+  let status: "active" | "closed" = "active";
+  let closedAt: number | undefined;
+  for (const t of event.tags) {
+    if (t[0] === "fa:status") {
+      if (t[1] === "closed") status = "closed";
+    } else if (t[0] === "fa:closed-at") {
+      const n = Number(t[1]);
+      if (Number.isFinite(n) && n > 0) closedAt = n;
+    }
+  }
+
+  const value: AudienceDeclaration = {
+    audIdPub: event.pubkey,
+    slug: dTag,
+    epoch,
+    epochPub,
+    members,
+    pending,
+    status,
   };
+  if (closedAt !== undefined) value.closedAt = closedAt;
+  return { ok: true, value };
 }
 
 /**
