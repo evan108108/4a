@@ -253,7 +253,7 @@ async function lookupDeclarationByAddress(
   const stub = env.RELAY_POOL.get(id);
   const event = await stub.getObject(30520, audIdPub, slug);
   if (!event) return null;
-  const parsed = parseAudienceDeclaration(event);
+  const parsed = parseAudienceDeclaration(event, { dropExpiredPending: true });
   if (!parsed.ok) return null;
   return { event, decl: parsed.value };
 }

@@ -72,7 +72,7 @@ export async function loadAudienceStatus(
   const stub = env.RELAY_POOL.get(id);
   const event = await stub.getObject(30520, audIdPub, slug);
   if (!event) return null;
-  const parsed = parseAudienceDeclaration(event);
+  const parsed = parseAudienceDeclaration(event, { dropExpiredPending: true });
   if (!parsed.ok) return null;
   const { status, closedAt } = readAudienceStatus(event);
   const snapshot: AudienceStatusSnapshot = {

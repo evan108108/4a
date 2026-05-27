@@ -85,6 +85,18 @@ function nowSec(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+export interface ParseDeclarationOptions {
+  /**
+   * Drop `fa:pending` entries whose expiration is in the past instead of
+   * rejecting the whole declaration. Read paths (stream, status, lookups) set
+   * this `true`: a lapsed invite is a normal lifecycle state, and the cached
+   * declaration is immutable until republished — a single expired invite must
+   * not 500 every member's stream. Publish-time validation leaves it `false`
+   * (strict) so an already-dead invite is still rejected at issuance.
+   */
+  dropExpiredPending?: boolean;
+}
+
 /**
  * Parse a `kind:30520` event into a structured declaration. Returns
  * `{ ok: false, error }` on the same conditions that `validateAudienceEvent`
@@ -93,6 +105,7 @@ function nowSec(): number {
  */
 export function parseAudienceDeclaration(
   event: NostrEvent,
+  opts: ParseDeclarationOptions = {},
 ):
   | { ok: true; value: AudienceDeclaration }
   | { ok: false; error: string } {
@@ -156,6 +169,9 @@ export function parseAudienceDeclaration(
       return { ok: false, error: '"fa:pending" expiration must be an integer unix timestamp' };
     }
     if (expirationUnix <= nowSec()) {
+      // Read paths drop the lapsed invite; publish-time validation rejects it.
+      // See ParseDeclarationOptions.dropExpiredPending.
+      if (opts.dropExpiredPending) continue;
       return { ok: false, error: '"fa:pending" expiration is in the past' };
     }
     pending.push({ invitePub, expirationUnix });

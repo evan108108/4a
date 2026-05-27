@@ -117,4 +117,34 @@ describe("validateAudienceEvent", () => {
       expect(r.value.pending[0]!.invitePub).toEqual("c".repeat(64));
     }
   });
+
+  it("parseAudienceDeclaration still rejects an expired pending by default (publish-strict)", () => {
+    const e = canonical();
+    e.tags.push(["fa:pending", `${"c".repeat(64)}:1`]); // expired
+    const r = parseAudienceDeclaration(e);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/expiration is in the past/);
+  });
+
+  it("dropExpiredPending drops the lapsed invite instead of failing the declaration (read-strict)", () => {
+    const e = canonical();
+    e.tags.push(["fa:pending", `${"c".repeat(64)}:1`]); // expired ~lifecycle-normal
+    e.tags.push(["fa:pending", `${"d".repeat(64)}:${FUTURE}`]); // still live
+    const r = parseAudienceDeclaration(e, { dropExpiredPending: true });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      // The expired one is filtered out; the live one survives. Members are
+      // untouched, so a member's stream still resolves.
+      expect(r.value.members).toEqual([MEMBER_1, MEMBER_2]);
+      expect(r.value.pending.map((p) => p.invitePub)).toEqual(["d".repeat(64)]);
+    }
+  });
+
+  it("dropExpiredPending parses a declaration whose ONLY pending is expired", () => {
+    const e = canonical();
+    e.tags.push(["fa:pending", `${"c".repeat(64)}:1`]); // the project-studio repro
+    const r = parseAudienceDeclaration(e, { dropExpiredPending: true });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.pending).toEqual([]);
+  });
 });
