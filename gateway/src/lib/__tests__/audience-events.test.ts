@@ -83,6 +83,7 @@ describe("audience-events end-to-end shape", () => {
         epochPub: EPOCH_PUB,
         members: [MEMBER_PUB],
         pending: [],
+        status: "active" as const,
       }),
     };
     expect(validateKeyGrantEvent(signed, lookup)).toEqual({ ok: true });
@@ -114,6 +115,7 @@ describe("audience-events end-to-end shape", () => {
         epochPub: EPOCH_PUB,
         members: [],
         pending: [{ invitePub: INVITE_PUB, expirationUnix: FUTURE }],
+        status: "active" as const,
       }),
     };
     expect(validateAudienceClaimEvent(signed, lookup)).toEqual({ ok: true });
@@ -146,6 +148,7 @@ describe("audience-events end-to-end shape", () => {
         epochPub: EPOCH_PUB,
         members: [MEMBER_PUB],
         pending: [],
+        status: "active" as const,
       }),
     };
     expect(validateEncryptedVariantEvent(signed, lookup)).toEqual({ ok: true });

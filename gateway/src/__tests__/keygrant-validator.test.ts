@@ -59,6 +59,7 @@ const declarationLookup: AudienceLookup = {
           epochPub: EPOCH_PUB,
           members: [RECIPIENT_PUB],
           pending: [],
+          status: "active",
         }
       : undefined,
 };
@@ -107,6 +108,7 @@ describe("validateKeyGrantEvent", () => {
         epochPub: EPOCH_PUB,
         members: ["9".repeat(64)],
         pending: [],
+        status: "active",
       }),
     });
     expect(r.ok).toBe(false);
