@@ -51,6 +51,12 @@ const AUDIENCE_KINDS = [30510, 30511, 30512, 30513, 30514, 30520, 30521, 30522] 
 // Gift-wraps (kind:1059) are recipient-addressable but carry no `d` tag, so
 // they're stored under a separate prefix indexed by recipient pubkey.
 const GIFT_WRAP_PREFIX = "giftwrap:";
+
+// Webhook-relay wraps live under their own prefix so hook retention can be
+// swept without touching audience replay, and so the inbox stream can tail
+// hook traffic without serving audience wraps the plugin would discard.
+const HOOK_WRAP_PREFIX = "hookwrap:";
+const HOOK_WRAP_RETENTION_SECONDS = 7 * 24 * 3600;
 const SUBSCRIPTION_ID = "4a-pool";
 
 const RECONNECT_BASE_MS = 2_000;
@@ -433,6 +439,93 @@ export class RelayPool extends DurableObject<unknown> {
           ? newestReceivedAt - sinceUnix
           : null,
       });
+    }
+    return out;
+  }
+
+  /**
+   * Delete hook wraps for `recipient` older than the retention window.
+   * Keys embed the zero-padded server-receive second, so expired entries
+   * are exactly the key range below the cutoff key — the range is anchored
+   * under HOOK_WRAP_PREFIX:<recipient>: and can never touch audience
+   * storage. Batch capped so a hook resuming after months of dormancy
+   * can't stall a write with a pathological catch-up delete.
+   *
+   * Known v1 limit: a recipient that stops both writing and reading keeps
+   * its in-flight wraps indefinitely. Acceptable at pilot volume; a cron
+   * trigger is the escalation path if that ever matters.
+   */
+  private async pruneExpiredHookWraps(recipient: string): Promise<number> {
+    const cutoffSec = Math.floor(Date.now() / 1000) - HOOK_WRAP_RETENTION_SECONDS;
+    const rcpt = recipient.toLowerCase();
+    const expired = await this.ctx.storage.list({
+      prefix: `${HOOK_WRAP_PREFIX}${rcpt}:`,
+      end: `${HOOK_WRAP_PREFIX}${rcpt}:${String(cutoffSec).padStart(12, "0")}`,
+      limit: 50,
+    });
+    if (expired.size === 0) return 0;
+    await this.ctx.storage.delete([...expired.keys()]);
+    console.log("[pruneExpiredHookWraps]", { recipient: rcpt.slice(0, 12), deleted: expired.size });
+    return expired.size;
+  }
+
+  /**
+   * Store a webhook-relay gift-wrap under HOOK_WRAP_PREFIX. Same validation
+   * as storeGiftWrap, distinct keyspace: hook retention and the inbox stream
+   * must never touch audience wraps (and vice versa).
+   */
+  async storeHookWrap(event: NostrEvent, recipient: string): Promise<{ ok: boolean; reason?: string }> {
+    if (event.kind !== 1059) return { ok: false, reason: "kind must be 1059" };
+    if (canonicalEventId(event) !== event.id) {
+      return { ok: false, reason: "id mismatch" };
+    }
+    if (!schnorr.verify(fromHex(event.sig), fromHex(event.id), fromHex(event.pubkey))) {
+      return { ok: false, reason: "signature verification failed" };
+    }
+    if (!/^[0-9a-f]{64}$/i.test(recipient)) {
+      return { ok: false, reason: "recipient must be 32-byte hex" };
+    }
+    // Server-receive time, not the NIP-59-jittered created_at — same
+    // reasoning as storeGiftWrap above.
+    const receivedAtSec = Math.floor(Date.now() / 1000);
+    const ts = String(receivedAtSec).padStart(12, "0");
+    const key = `${HOOK_WRAP_PREFIX}${recipient.toLowerCase()}:${ts}:${event.id}`;
+    const stored = { ...event, _receivedAt: receivedAtSec } as NostrEvent & { _receivedAt: number };
+    await this.ctx.storage.put(key, stored);
+    await this.pruneExpiredHookWraps(recipient);
+    console.log("[storeHookWrap] stored", {
+      recipient: recipient.toLowerCase().slice(0, 12),
+      id: event.id.slice(0, 12),
+      received_at: receivedAtSec,
+    });
+    return { ok: true };
+  }
+
+  /**
+   * Fetch cached hook wraps addressed to `recipient`, oldest-first, filtered
+   * by server-receive time (`sinceUnix` inclusive-exclusive semantics match
+   * listGiftWraps). Reads only HOOK_WRAP_PREFIX — audience traffic never
+   * appears here.
+   */
+  async listHookWraps(
+    recipient: string,
+    sinceUnix?: number,
+    limit = 100,
+  ): Promise<NostrEvent[]> {
+    if (!/^[0-9a-f]{64}$/i.test(recipient)) return [];
+    // Read-path prune: an active subscriber self-cleans even when the
+    // recipient isn't currently receiving writes.
+    await this.pruneExpiredHookWraps(recipient);
+    const list = await this.ctx.storage.list<NostrEvent & { _receivedAt?: number }>({
+      prefix: `${HOOK_WRAP_PREFIX}${recipient.toLowerCase()}:`,
+    });
+    const out: NostrEvent[] = [];
+    for (const ev of list.values()) {
+      const receivedAt = ev._receivedAt;
+      if (sinceUnix !== undefined && typeof receivedAt === "number" && receivedAt < sinceUnix) continue;
+      const { _receivedAt: _drop, ...clean } = ev;
+      out.push(clean as NostrEvent);
+      if (out.length >= limit) break;
     }
     return out;
   }

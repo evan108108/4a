@@ -24,6 +24,8 @@ import { handleAudienceByInvitePubRequest } from "./audience-by-invite-pub";
 import { handleAudienceRawRequest } from "./audience-raw";
 import { handleAudienceStreamRequest } from "./audience-stream";
 import { handleBlossomRequest } from "./blossom";
+import { handleHookRequest } from "./webhook-receiver";
+import { handleInboxStream } from "./inbox-stream";
 import { handleCommentRequest } from "./comment";
 import { handleMcpRequest } from "./mcp";
 import type { McpHub } from "./mcp";
@@ -91,6 +93,23 @@ export default {
       }
       if (url.pathname.startsWith("/v0/audience/raw/")) {
         return handleAudienceRawRequest(request, env);
+      }
+      // Webhook-relay ingress: POST /v0/hook/:pubkey/:slug — public,
+      // unauthenticated by design (third parties can't sign NIP-98);
+      // rate-limited + size-capped in the handler.
+      const hookMatch = url.pathname.match(
+        /^\/v0\/hook\/([0-9a-f]{64})\/([A-Za-z0-9_-]+)$/,
+      );
+      if (hookMatch) {
+        return handleHookRequest(request, hookMatch[1]!, hookMatch[2]!, env);
+      }
+      // Webhook-relay inbox: GET /v0/inbox/:pubkey/stream — NIP-98-gated
+      // pubkey-scoped SSE tail of hook wraps.
+      const inboxStreamMatch = url.pathname.match(
+        /^\/v0\/inbox\/([0-9a-f]{64})\/stream$/,
+      );
+      if (inboxStreamMatch) {
+        return handleInboxStream(request, inboxStreamMatch[1]!, env);
       }
       // Public read keyed by invite_pub. Must match before the generic
       // /v0/audience/ dispatcher so the slug-shaped path doesn't claim it.
