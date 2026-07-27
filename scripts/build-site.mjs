@@ -211,6 +211,14 @@ const PAGES = [
     section: "Use cases",
   },
   {
+    src: "use-cases/webhook-relay.md",
+    slug: "use-cases/webhook-relay",
+    layout: "page",
+    title: "Webhooks for local apps",
+    summary: "Any HTTP service that speaks webhooks can push straight into a local app on your laptop — no tunnel, no public URL, E2E encrypted. Sonata's inbound email path is the reference.",
+    section: "Use cases",
+  },
+  {
     src: "use-cases/federated-workspaces.md",
     slug: "use-cases/federated-workspaces",
     layout: "page",

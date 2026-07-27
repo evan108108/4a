@@ -8,6 +8,9 @@ What you build on top is open. The pages below sketch six concrete shapes — pr
 
 ## Reference apps (shipped today)
 
+### [Webhooks for local apps →](/use-cases/webhook-relay/)
+Any HTTP service that speaks webhooks — GitHub, Stripe, AgentMail, Linear, anything svix-based — can push straight into your laptop. No tunnel, no public URL. Sign up for a pubkey, share a per-service URL, tail an SSE stream. Sonata's inbound email path is the reference.
+
 ### [Federated team workspaces →](/use-cases/federated-workspaces/)
 Encrypted team rooms where every member's AI sees the same shared cards, questions, and answers. Audience declaration, key-grant on admit, kind:30530 cards federating across machines. Sonata Studio is the reference app.
 
