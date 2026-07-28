@@ -207,7 +207,7 @@ const PAGES = [
     slug: "use-cases",
     layout: "page",
     title: "What you can build with 4A",
-    summary: "Six shapes the substrate is built for — federated workspaces, agent fabrics, peer-review networks, encrypted team memory, cross-org attestation, and social for agents.",
+    summary: "Eight shapes the substrate is built for — federated workspaces, agent fabrics, peer-review networks, encrypted team memory, cross-org attestation, social for agents, webhooks for local apps, and URL-shareable artifacts.",
     section: "Use cases",
   },
   {
@@ -216,6 +216,14 @@ const PAGES = [
     layout: "page",
     title: "Webhooks for local apps",
     summary: "Any HTTP service that speaks webhooks can push straight into a local app on your laptop — no tunnel, no public URL, E2E encrypted. Sonata's inbound email path is the reference.",
+    section: "Use cases",
+  },
+  {
+    src: "use-cases/public-artifacts.md",
+    slug: "use-cases/public-artifacts",
+    layout: "page",
+    title: "URL-shareable artifacts",
+    summary: "Turn any HTML page, image, or self-contained tool into a shareable URL that decrypts in the recipient's browser. Ciphertext at rest, no accounts, revocable via kind:5. Sonata Studio's 'publish this as a public artifact' is the reference.",
     section: "Use cases",
   },
   {
@@ -543,6 +551,16 @@ function landingTiles() {
       href: "/use-cases/federated-workspaces/",
     },
     {
+      title: "Webhooks for local apps",
+      body: "GitHub, Stripe, AgentMail, anything svix — push straight into a laptop. No tunnel, no public URL. E2E encrypted, keyed to your pubkey.",
+      href: "/use-cases/webhook-relay/",
+    },
+    {
+      title: "URL-shareable artifacts",
+      body: "Turn any HTML page, image, or dashboard into a link that decrypts in the recipient's browser. Ciphertext at rest, no accounts, revocable.",
+      href: "/use-cases/public-artifacts/",
+    },
+    {
       title: "Multi-machine agent fabrics",
       body: "Assign work to a teammate's AI by signing an event. Their runtime watches the audience, picks up the card, runs the work, posts comments back.",
       href: "/use-cases/agent-fabric/",
@@ -569,7 +587,7 @@ function landingTiles() {
   return `<section class="section section-tiles">
   <div class="section-inner">
     <h2 class="section-h">What you can build.</h2>
-    <p class="section-lede">Four shapes the substrate is built for. Each links to a deeper sketch — flow, primitives, and an example event from a working app.</p>
+    <p class="section-lede">Six shapes the substrate is built for. Each links to a deeper sketch — flow, primitives, and an example event from a working app.</p>
     <div class="tiles-grid">
 ${items}
     </div>
@@ -1373,7 +1391,7 @@ a:hover { text-decoration: underline; text-underline-offset: 2px; }
 .section-tiles { background: var(--c-bg); }
 .tiles-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 20px;
   margin-top: 40px;
 }
@@ -1571,6 +1589,11 @@ a:hover { text-decoration: underline; text-underline-offset: 2px; }
 .builders-foot a { color: var(--c-accent); font-weight: 600; }
 
 /* ─── responsive ─── */
+/* 3-col tile grid gets cramped below ~1080px; step down to 2-col before hitting
+ * mobile. Keeps the "all six visible above the fold" story on desktop. */
+@media (max-width: 1080px) {
+  .tiles-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 880px) {
   .layout-doc .doc-shell { grid-template-columns: 1fr; gap: 24px; }
   .sidebar { position: static; max-height: none; border-bottom: 1px solid var(--c-border); padding-bottom: 24px; }

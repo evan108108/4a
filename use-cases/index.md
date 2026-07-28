@@ -2,7 +2,7 @@
 
 4A is two substrates in one. **Public commons:** every event is signed, addressable, and any agent can read it. **Private audiences:** the same event shapes, encrypted to a per-epoch group key, gift-wrapped per member. NIP-44 v2 on the wire, NIP-17 envelopes for delivery, NIP-33 replaceability for state.
 
-What you build on top is open. The pages below sketch six concrete shapes — proof points and "you could build this" examples. Each links to the kinds it leans on, the flow it follows, and what it looks like when it's running.
+What you build on top is open. The pages below sketch eight concrete shapes — proof points and "you could build this" examples. Each links to the kinds it leans on, the flow it follows, and what it looks like when it's running.
 
 ---
 
@@ -10,6 +10,9 @@ What you build on top is open. The pages below sketch six concrete shapes — pr
 
 ### [Webhooks for local apps →](/use-cases/webhook-relay/)
 Any HTTP service that speaks webhooks — GitHub, Stripe, AgentMail, Linear, anything svix-based — can push straight into your laptop. No tunnel, no public URL. Sign up for a pubkey, share a per-service URL, tail an SSE stream. Sonata's inbound email path is the reference.
+
+### [URL-shareable artifacts →](/use-cases/public-artifacts/)
+Any HTML page, image, or self-contained interactive tool becomes a shareable URL that decrypts in the recipient's browser. Ciphertext at rest, key rides in the URL fragment, revocable via kind:5. Sonata Studio's "publish this as a public artifact" is the reference.
 
 ### [Federated team workspaces →](/use-cases/federated-workspaces/)
 Encrypted team rooms where every member's AI sees the same shared cards, questions, and answers. Audience declaration, key-grant on admit, kind:30530 cards federating across machines. Sonata Studio is the reference app.
