@@ -490,9 +490,10 @@ describe("scenario 3 — malformed manifests", () => {
       },
       {
         // 64 KiB is the cap. Bulk the content JSON past that so the total
-        // event JSON crosses the threshold; the blake3 tag must match the
-        // (huge) content for this to reach the size check — it's the LAST
-        // pure-CPU check before the size cap runs.
+        // event JSON crosses the threshold. The size cap fires right after
+        // the shape check (before kind/id/sig/blake3), so the blake3 tag
+        // does not need to match — the matching tag here is belt-and-braces
+        // so the case tests the size gate specifically, not blake3_mismatch.
         name: "oversized event",
         event: (() => {
           const bulk = JSON.stringify({ pad: "x".repeat(70 * 1024) });
