@@ -127,8 +127,21 @@ export const VIEWER_JS = `"use strict";
     }
   }
 
+  function withCharsetIfText(type) {
+    // Blob-URL responses have no Content-Type charset header — for text-shaped
+    // content the browser falls back to Latin-1 sniffing and mangles UTF-8
+    // bytes into mojibake (— → â€", → → â†'). Pin the charset for text/*
+    // and SVG; images/audio/video stay bare.
+    var t = String(type || "").toLowerCase();
+    if (/;\s*charset=/.test(t)) return type;
+    if (t.indexOf("text/") === 0 || t === "image/svg+xml") {
+      return type + "; charset=utf-8";
+    }
+    return type;
+  }
+
   function renderFramed(plaintext, type) {
-    var url = URL.createObjectURL(new Blob([plaintext], { type: type }));
+    var url = URL.createObjectURL(new Blob([plaintext], { type: withCharsetIfText(type) }));
     var frame = document.createElement("iframe");
     frame.setAttribute("sandbox", "allow-scripts");
     frame.setAttribute("referrerpolicy", "no-referrer");
@@ -162,7 +175,7 @@ export const VIEWER_JS = `"use strict";
     var a = document.createElement("a");
     a.className = "download";
     a.href = URL.createObjectURL(
-      new Blob([plaintext], { type: type || "application/octet-stream" })
+      new Blob([plaintext], { type: withCharsetIfText(type || "application/octet-stream") })
     );
     a.download = "artifact-" + sha.slice(0, 8);
     a.textContent = "Download artifact (" + plaintext.length + " bytes)";
