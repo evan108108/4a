@@ -85,7 +85,8 @@ function makeFakePool(): FakePool {
       const key = `30540:${event.pubkey}:${d}`;
       const existing = pool.events.get(key);
       if (existing && existing.created_at >= event.created_at) {
-        return { ok: true, superseded: true, bound: true };
+        // Task 1's real DO reports bound=false here too — nothing was (re)bound.
+        return { ok: true, superseded: true, bound: false };
       }
       pool.events.set(key, event);
       // artifactid: full historical snapshot (dispatcher-confirmed).
@@ -530,8 +531,10 @@ describe("scenario 4 — replaceable supersede", () => {
       created_at: t - 10,
     });
     const staleRes = await publishManifest(env, stale);
-    expect(staleRes.status).toBe(200);
-    expect(((await staleRes.json()) as Record<string, unknown>).superseded).toBe(true);
+    expect(staleRes.status).toBe(409);
+    const staleBody = (await staleRes.json()) as Record<string, unknown>;
+    expect(staleBody.error).toBe("superseded");
+    expect(staleBody.latest_url).toBe(`https://api.4a4.ai/v0/artifacts/${DAVE.pub}/dash`);
     const still = await islandOf(await render(env, `/v0/artifacts/${DAVE.pub}/dash`));
     expect(still.title).toBe("v2");
   });

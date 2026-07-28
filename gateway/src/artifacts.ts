@@ -249,6 +249,15 @@ async function handleManifestPublish(request: Request, env: ArtifactsEnv): Promi
   if (!stored.ok) {
     return jsonError("internal_error", `store failed: ${stored.reason ?? "unknown"}`, 500);
   }
+  // Order matters: a stale (older-created_at) publish also reports bound=false,
+  // but the caller's problem is "you sent stale data", not a binding conflict.
+  if (stored.superseded) {
+    return jsonResponse(409, {
+      error: "superseded",
+      message: "an equal-or-newer manifest already exists at this address",
+      latest_url: latestUrl(pubkey, d),
+    });
+  }
   if (!stored.bound) {
     // The frozen URL for this sha already belongs to another (pubkey, d).
     // The manifest itself stored fine — the d-tag URL still works.
@@ -260,7 +269,7 @@ async function handleManifestPublish(request: Request, env: ArtifactsEnv): Promi
   }
   return jsonResponse(200, {
     ok: true,
-    superseded: stored.superseded,
+    superseded: false,
     frozen_url: frozenUrl(blobSha),
     latest_url: latestUrl(pubkey, d),
   });
