@@ -75,6 +75,14 @@ const BOB = keypair("22");
 const CAROL = keypair("33");
 const DAVE = keypair("44");
 const ERIN = keypair("55");
+// Keypairs used ONLY by the rate-limit tests below. Each rate-limit test
+// exhausts one bucket, so each test gets its own fresh keypair — otherwise
+// the second test starts at a mid-window count and never hits 60/61 as
+// expected. FRANK: manifest 429 test. GRACE: poisoning-guard test.
+// HARRY: revoke 429 test.
+const FRANK = keypair("66");
+const GRACE = keypair("77");
+const HARRY = keypair("88");
 
 // ── Fake pool (Task 1 interface contract) ───────────────────────────────────
 
@@ -746,5 +754,114 @@ describe("render 404s", () => {
     r2.objects.delete(`blob/${SHA_1}`);
     expect((await render(env, `/v0/artifacts/${SHA_1}`)).status).toBe(404);
     expect((await render(env, `/v0/artifacts/${DAVE.pub}/gone`)).status).toBe(404);
+  });
+});
+
+// ── Rate limits ─────────────────────────────────────────────────────────────
+
+describe("rate limits", () => {
+  it("manifest publish: 61st valid request from the same signer 429s", async () => {
+    const pool = makeFakePool();
+    const r2 = makeFakeR2();
+    // Same publisher (FRANK) publishing to unique d-tags on unique blobs each
+    // iteration so nothing hits 409 (superseded / blob_already_bound) — the
+    // sole failure axis under test is the per-pubkey rate limit.
+    const env = makeEnv(pool, r2);
+    let got429 = 0;
+    let got200 = 0;
+    for (let i = 0; i < 61; i++) {
+      const sha = `${i.toString(16).padStart(2, "0")}${"e".repeat(62)}`;
+      r2.seedBlob(sha, FRANK.pub);
+      const res = await publishManifest(
+        env,
+        manifestEvent(FRANK.priv, { d: `slot-${i}`, blob: sha }),
+      );
+      if (res.status === 200) got200++;
+      else if (res.status === 429) got429++;
+    }
+    expect(got200).toBe(60);
+    expect(got429).toBe(1);
+  });
+
+  it("manifest publish: unsigned/bad-sig POSTs claiming a victim pubkey do NOT poison the victim's rate-limit bucket", async () => {
+    // Finding 1 regression guard. Attacker sends 60 unsigned POSTs claiming to
+    // be the victim; before the fix these bumped the victim's rate-limit
+    // counter to 60. After the fix, the rate limit only fires post-validate,
+    // so the victim can still make all 60 legitimate publishes.
+    const pool = makeFakePool();
+    const r2 = makeFakeR2();
+    const env = makeEnv(pool, r2);
+
+    // 60 unsigned attacks claiming to be GRACE.
+    for (let i = 0; i < 60; i++) {
+      const attack = new Request("https://api.4a4.ai/v0/artifacts/manifest", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          event: {
+            id: "0".repeat(64),
+            pubkey: GRACE.pub,
+            sig: "0".repeat(128),
+            created_at: 0,
+            kind: 30540,
+            tags: [],
+            content: "",
+          },
+        }),
+      });
+      const res = await handleArtifactsRequest(attack, env);
+      // Every attack must be rejected by validation (invalid shape/sig), NOT
+      // by rate-limit — 429 here would prove the poisoning still happens.
+      expect(res.status, `attack ${i}`).not.toBe(429);
+    }
+
+    // GRACE can still make 60 legitimate publishes — rate-limit bucket
+    // remains at zero from her perspective.
+    let got200 = 0;
+    for (let i = 0; i < 60; i++) {
+      const sha = `${i.toString(16).padStart(2, "0")}${"d".repeat(62)}`;
+      r2.seedBlob(sha, GRACE.pub);
+      const res = await publishManifest(
+        env,
+        manifestEvent(GRACE.priv, { d: `real-${i}`, blob: sha }),
+      );
+      if (res.status === 200) got200++;
+    }
+    expect(got200).toBe(60);
+  });
+
+  it("revoke: 61st valid request from the same signer 429s", async () => {
+    // Fresh pool per test so the rate limiter is the only 429 source.
+    const pool = makeFakePool();
+    const r2 = makeFakeR2();
+    // Pre-publish one manifest HARRY can then revoke over and over via new
+    // kind:5 events. (Revoke doesn't need the underlying manifest to still be
+    // un-revoked to *store* another kind:5 — kind:5's a-tag semantics are
+    // append-with-latest-created_at-wins.) HARRY's manifest bucket and revoke
+    // bucket are separate keys (`artifact-manifest:` vs `artifact-revoke:`),
+    // so the one seed publish doesn't consume HARRY's revoke budget.
+    const sha = `ff${"c".repeat(62)}`;
+    r2.seedBlob(sha, HARRY.pub);
+    const env = makeEnv(pool, r2);
+    expect(
+      (await publishManifest(env, manifestEvent(HARRY.priv, { d: "revoke-target", blob: sha })))
+        .status,
+    ).toBe(200);
+
+    let got429 = 0;
+    let got200 = 0;
+    for (let i = 0; i < 61; i++) {
+      // Fresh timestamp per revoke so latest-wins keeps advancing.
+      const rev = kind5Event(
+        HARRY.priv,
+        [["a", `30540:${HARRY.pub}:revoke-target`]],
+        nowSec() + i,
+      );
+      const res = await revoke(env, rev);
+      if (res.status === 200) got200++;
+      else if (res.status === 429) got429++;
+    }
+    expect(got200).toBe(60);
+    expect(got429).toBe(1);
   });
 });

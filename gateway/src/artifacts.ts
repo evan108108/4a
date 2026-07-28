@@ -179,18 +179,10 @@ async function handleManifestPublish(request: Request, env: ArtifactsEnv): Promi
   const parsed = await readEventBody(request);
   if (parsed instanceof Response) return parsed;
 
-  // Rate limit before the expensive schnorr/R2 work. Key on the claimed
-  // pubkey when one is present; a garbage pubkey fails validation right after.
-  const claimedPubkey = (parsed.event as Record<string, unknown> | null)?.pubkey;
-  if (typeof claimedPubkey === "string" && claimedPubkey.length > 0) {
-    const rl = rateLimitCheck(`artifact-manifest:${claimedPubkey.toLowerCase()}`);
-    if (!rl.ok) {
-      return jsonError("rate_limited", "manifest publish rate limit exceeded", 429, {
-        "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)),
-      });
-    }
-  }
-
+  // Validate FIRST (shape/id/sig/tags/R2 head). Only after the signature
+  // authenticates the pubkey do we touch the rate limiter — keying on an
+  // unauthenticated pubkey would let anyone lock a victim out of publishing
+  // with 60 unsigned POSTs. This mirrors handleRevoke's ordering below.
   const blobLookup: BlobLookup = {
     async headBlob(sha) {
       const head = await env.STORAGE.head(`blob/${sha}`);
@@ -203,6 +195,13 @@ async function handleManifestPublish(request: Request, env: ArtifactsEnv): Promi
     return jsonError(result.code, result.message, result.status);
   }
   const event = result.event;
+
+  const rl = rateLimitCheck(`artifact-manifest:${event.pubkey.toLowerCase()}`);
+  if (!rl.ok) {
+    return jsonError("rate_limited", "manifest publish rate limit exceeded", 429, {
+      "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)),
+    });
+  }
   const d = findTag(event.tags, "d")!;
   const blobSha = findTag(event.tags, "blob")!.toLowerCase();
   const pubkey = event.pubkey.toLowerCase();

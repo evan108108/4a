@@ -25,6 +25,12 @@ const HEX128 = /^[0-9a-f]{128}$/;
 const D_TAG = /^[A-Za-z0-9_-]{1,64}$/;
 const MIME_TYPE = /^[a-z]+\/[a-z0-9][a-z0-9.+-]{0,126}$/;
 const MAX_TITLE_CHARS = 200;
+const MAX_ALT_CHARS = 500;
+// Total manifest event size cap. DO storage values have per-key limits
+// (128 KiB KV-backed, ~2 MiB SQLite-backed) and the render path serves the
+// manifest inline in the metadata island — 64 KiB matches the webhook-relay
+// per-body cap and keeps the island a reasonable size for every render.
+const MAX_EVENT_BYTES = 64 * 1024;
 // Manifests may not be timestamped more than 15 min in the future — prevents
 // pinning an unsupersedeable far-future created_at (replaceable-supersede
 // compares created_at in the relay pool).
@@ -49,13 +55,16 @@ export function findTag(tags: string[][], name: string): string | undefined {
 }
 
 // Shape check — same pattern as lib/blossom-auth.ts (copied, not imported;
-// that module is upload-auth-specific).
+// that module is upload-auth-specific). Hex fields are strict-lowercase to
+// match the DO storage key format: a mixed-case pubkey would store fine but
+// then render/revoke paths (which lowercase before lookup) would miss the
+// row — dead latest_url and un-a-tag-revokable address.
 function isValidNostrEvent(e: unknown): e is NostrEvent {
   if (!e || typeof e !== "object") return false;
   const r = e as Record<string, unknown>;
   if (typeof r.id !== "string" || !HEX64.test(r.id)) return false;
-  if (typeof r.pubkey !== "string" || !HEX64.test(r.pubkey.toLowerCase())) return false;
-  if (typeof r.sig !== "string" || !HEX128.test(r.sig.toLowerCase())) return false;
+  if (typeof r.pubkey !== "string" || !HEX64.test(r.pubkey)) return false;
+  if (typeof r.sig !== "string" || !HEX128.test(r.sig)) return false;
   if (typeof r.created_at !== "number" || !Number.isFinite(r.created_at)) return false;
   if (typeof r.kind !== "number" || !Number.isInteger(r.kind)) return false;
   if (typeof r.content !== "string") return false;
@@ -86,6 +95,18 @@ export async function validateArtifactManifest(args: {
 
   if (!isValidNostrEvent(event)) {
     return fail(400, "invalid_event", "body.event is not a well-formed Nostr event");
+  }
+  // Total-event-size cap. Fires before the schnorr verify so an oversized
+  // (but well-shaped) event doesn't burn crypto — and before storage so a
+  // valid but too-large manifest can't hit the DO put limit mid-write,
+  // leaving artifactid partially populated.
+  const eventBytes = new TextEncoder().encode(JSON.stringify(event)).length;
+  if (eventBytes > MAX_EVENT_BYTES) {
+    return fail(
+      413,
+      "event_too_large",
+      `event JSON exceeds ${MAX_EVENT_BYTES} bytes (got ${eventBytes})`,
+    );
   }
   if (event.kind !== ARTIFACT_MANIFEST_KIND) {
     return fail(400, "wrong_kind", `kind must be ${ARTIFACT_MANIFEST_KIND}, got ${event.kind}`);
@@ -122,6 +143,9 @@ export async function validateArtifactManifest(args: {
   const alt = findTag(event.tags, "alt");
   if (!alt || alt.length === 0) {
     return fail(400, "missing_alt", 'tag "alt" missing or empty');
+  }
+  if (alt.length > MAX_ALT_CHARS) {
+    return fail(400, "bad_alt", `tag "alt" exceeds ${MAX_ALT_CHARS} chars`);
   }
   const blake3Tag = findTag(event.tags, "blake3");
   if (!blake3Tag || blake3Tag !== blake3ContentTag(event.content)) {
