@@ -24,6 +24,7 @@ import { handleAudienceByInvitePubRequest } from "./audience-by-invite-pub";
 import { handleAudienceRawRequest } from "./audience-raw";
 import { handleAudienceStreamRequest } from "./audience-stream";
 import { handleBlossomRequest } from "./blossom";
+import { handleArtifactsRequest } from "./artifacts";
 import { handleHookRequest } from "./webhook-receiver";
 import { handleInboxStream } from "./inbox-stream";
 import { handleCommentRequest } from "./comment";
@@ -129,6 +130,10 @@ export default {
       }
       if (url.pathname.startsWith("/v0/audience/")) {
         return handleAudienceRequest(request, env);
+      }
+      // Public artifacts: manifest publish / kind:5 revoke / viewer renders.
+      if (url.pathname.startsWith("/v0/artifacts/")) {
+        return handleArtifactsRequest(request, env);
       }
       return handleApiRequest(request, env);
     }
