@@ -91,6 +91,32 @@ export async function handleBlossomUpload(
     return jsonError(auth.status, auth.code, "reason" in auth ? { reason: auth.reason } : undefined);
   }
 
+  // No-overwrite hardening: if this sha is already stored, keep the original
+  // object — and with it the original uploader_pubkey attribution — and skip
+  // both the put and the quota charge (Blossom "already have it" semantics).
+  // Blobs are publicly fetchable, so without this a re-upload of someone
+  // else's bytes would transfer manifest rights over their frozen artifact
+  // URL to the re-uploader.
+  const existing = await env.STORAGE.head(`blob/${bodySha}`);
+  if (existing) {
+    const uploadedAtMs = Number(existing.customMetadata?.uploaded_at_ms);
+    const payload = {
+      sha256: bodySha,
+      mirrors: [`https://${PUBLIC_HOST}/blossom/${bodySha}`],
+      url: `https://${PUBLIC_HOST}/blossom/${bodySha}`,
+      size: bodyBuf.byteLength,
+      uploaded: Math.floor((Number.isFinite(uploadedAtMs) ? uploadedAtMs : Date.now()) / 1000),
+      type:
+        existing.customMetadata?.content_type ??
+        existing.httpMetadata?.contentType ??
+        "application/octet-stream",
+    };
+    return new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: corsHeaders({ "Content-Type": "application/json; charset=utf-8" }),
+    });
+  }
+
   const quota = await readQuota(env.STORAGE, auth.pubkey);
   if (quota.bytes_used + bodyBuf.byteLength > PER_PUBKEY_QUOTA_BYTES) {
     return jsonError(413, "quota_exceeded", {

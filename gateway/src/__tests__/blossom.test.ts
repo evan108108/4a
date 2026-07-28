@@ -49,6 +49,15 @@ function makeR2Stub(seed?: Map<string, StoredObject>): R2Bucket {
         },
       };
     },
+    async head(key: string) {
+      const r = store.get(key);
+      if (!r) return null;
+      return {
+        size: r.body.byteLength,
+        customMetadata: r.customMetadata,
+        httpMetadata: r.httpMetadata,
+      };
+    },
     async delete(key: string) {
       store.delete(key);
     },
