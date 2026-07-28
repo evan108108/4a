@@ -477,10 +477,33 @@ describe("scenario 3 — malformed manifests", () => {
         code: "missing_alt",
       },
       {
+        name: "overlong alt",
+        event: manifestEvent(CAROL.priv, { blob: SHA_1, alt: "a".repeat(501) }),
+        status: 400,
+        code: "bad_alt",
+      },
+      {
         name: "overlong title",
         event: manifestEvent(CAROL.priv, { blob: SHA_1, title: "x".repeat(201) }),
         status: 400,
         code: "bad_title",
+      },
+      {
+        // 64 KiB is the cap. Bulk the content JSON past that so the total
+        // event JSON crosses the threshold; the blake3 tag must match the
+        // (huge) content for this to reach the size check — it's the LAST
+        // pure-CPU check before the size cap runs.
+        name: "oversized event",
+        event: (() => {
+          const bulk = JSON.stringify({ pad: "x".repeat(70 * 1024) });
+          return manifestEvent(CAROL.priv, {
+            blob: SHA_1,
+            content: bulk,
+            blake3: blake3ContentTag(bulk),
+          });
+        })(),
+        status: 413,
+        code: "event_too_large",
       },
       {
         name: "blake3 mismatch",

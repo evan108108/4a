@@ -118,12 +118,18 @@ function htmlErrorResponse(status: number, headline: string, detail: string): Re
 
 // ── Shared event plumbing ───────────────────────────────────────────────────
 
+// Strict-lowercase on hex fields, symmetric with the manifest validator's
+// isValidNostrEvent — DO storage keys are formed from these strings verbatim,
+// so accepting mixed case would let a mixed-case kind:5 store under a key
+// that lookup paths (which lowercase) never find. kind:5's own render/revoke
+// paths lowercase everywhere on the compare side, so relaxed here was
+// harmless today — but the asymmetry with the validator invited drift.
 function isValidNostrEvent(e: unknown): e is NostrEvent {
   if (!e || typeof e !== "object") return false;
   const r = e as Record<string, unknown>;
   if (typeof r.id !== "string" || !HEX64.test(r.id)) return false;
-  if (typeof r.pubkey !== "string" || !HEX64.test(r.pubkey.toLowerCase())) return false;
-  if (typeof r.sig !== "string" || !HEX128.test(r.sig.toLowerCase())) return false;
+  if (typeof r.pubkey !== "string" || !HEX64.test(r.pubkey)) return false;
+  if (typeof r.sig !== "string" || !HEX128.test(r.sig)) return false;
   if (typeof r.created_at !== "number" || !Number.isFinite(r.created_at)) return false;
   if (typeof r.kind !== "number" || !Number.isInteger(r.kind)) return false;
   if (typeof r.content !== "string") return false;
