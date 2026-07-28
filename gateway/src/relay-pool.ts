@@ -124,13 +124,6 @@ export interface ArtifactBlobBinding {
   boundAtMs: number;
 }
 
-// Value shape of `artifactid:<manifest-event-id>` — reverse index from a
-// manifest event id to its address, used by kind:5 e-tag resolution.
-export interface ArtifactManifestAddress {
-  pubkey: string;
-  d: string;
-}
-
 // Pre-resolved, pre-authorized targets of a kind:5 revocation. The endpoint
 // resolves e/a tags and enforces ownership; the DO only writes indexes.
 export interface ArtifactRevocationResolution {
@@ -574,8 +567,14 @@ export class RelayPool extends DurableObject<unknown> {
    * blake3/uploader/schema checks live in the manifest validator), plus the
    * two artifact indexes:
    *
-   *   - `artifactid:<event.id>` — always written; kept across supersedes so
-   *     kind:5 e-tag revocation can target old versions.
+   *   - `artifactid:<event.id>` — full event snapshot, always written and
+   *     kept across supersedes: the frozen-URL render path needs the
+   *     ORIGINAL manifest's metadata (title, publisher, created_at) after
+   *     the address key has been replaced by a newer version, and kind:5
+   *     e-tag resolution/authorization needs old versions addressable by id.
+   *     Grows unbounded (~1 KB per manifest ever published) — fine at pilot
+   *     volume; the v2 orphan-blob-sweep cron is the seam for aging out
+   *     superseded entries if it ever matters.
    *   - `artifactblob:<sha256>` — FIRST-WINS. Written when absent; refreshed
    *     (eventId/createdAt) when the existing binding has the same
    *     (pubkey, d); left untouched otherwise, reported as `bound: false`
@@ -607,8 +606,7 @@ export class RelayPool extends DurableObject<unknown> {
       return { ok: true, superseded: true, bound: false, reason: "superseded by existing newer event" };
     }
     await this.ctx.storage.put(key, event);
-    const address: ArtifactManifestAddress = { pubkey: event.pubkey, d: dTag };
-    await this.ctx.storage.put(`${ARTIFACT_ID_PREFIX}${event.id}`, address);
+    await this.ctx.storage.put(`${ARTIFACT_ID_PREFIX}${event.id}`, event);
 
     const blobKey = `${ARTIFACT_BLOB_PREFIX}${blobSha.toLowerCase()}`;
     const binding = await this.ctx.storage.get<ArtifactBlobBinding>(blobKey);
@@ -646,12 +644,15 @@ export class RelayPool extends DurableObject<unknown> {
     return binding ?? null;
   }
 
-  /** Point read of the `artifactid:<manifest-event-id>` reverse index. */
-  async getArtifactManifestAddress(eventId: string): Promise<ArtifactManifestAddress | null> {
-    const address = await this.ctx.storage.get<ArtifactManifestAddress>(
-      `${ARTIFACT_ID_PREFIX}${eventId}`,
-    );
-    return address ?? null;
+  /**
+   * Point read of the `artifactid:<manifest-event-id>` snapshot — the
+   * historical manifest event as published, surviving address supersedes.
+   * Used by the frozen-URL render path (original metadata + created_at for
+   * the revocation check) and by kind:5 e-tag authorization.
+   */
+  async getArtifactManifest(eventId: string): Promise<NostrEvent | null> {
+    const event = await this.ctx.storage.get<NostrEvent>(`${ARTIFACT_ID_PREFIX}${eventId}`);
+    return event ?? null;
   }
 
   /**

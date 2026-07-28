@@ -43,7 +43,6 @@ import { signEventWithRawKey } from "../lib/sign";
 import {
   RelayPool,
   type ArtifactBlobBinding,
-  type ArtifactManifestAddress,
   type NostrEvent,
 } from "../relay-pool";
 import { handleBlossomRequest, type BlossomEnv } from "../blossom";
@@ -136,8 +135,8 @@ describe("storeArtifactManifest", () => {
     const stored = storage.map.get(`event:30540:${ALICE_PUB}:dash`) as NostrEvent;
     expect(stored.id).toBe(m.id);
 
-    const address = storage.map.get(`artifactid:${m.id}`) as ArtifactManifestAddress;
-    expect(address).toEqual({ pubkey: ALICE_PUB, d: "dash" });
+    const snapshot = storage.map.get(`artifactid:${m.id}`) as NostrEvent;
+    expect(snapshot).toEqual(m);
 
     const binding = storage.map.get(`artifactblob:${SHA_A}`) as ArtifactBlobBinding;
     expect(binding.pubkey).toBe(ALICE_PUB);
@@ -381,15 +380,15 @@ describe("getArtifactRevocation", () => {
 
 // ── Point-read lookups ──────────────────────────────────────────────────────
 
-describe("getArtifactBlobBinding / getArtifactManifestAddress", () => {
+describe("getArtifactBlobBinding / getArtifactManifest", () => {
   it("returns null for unknown or malformed keys", async () => {
     const { pool } = makePool();
     expect(await pool.getArtifactBlobBinding(SHA_A)).toBeNull();
     expect(await pool.getArtifactBlobBinding("not-a-sha")).toBeNull();
-    expect(await pool.getArtifactManifestAddress("f".repeat(64))).toBeNull();
+    expect(await pool.getArtifactManifest("f".repeat(64))).toBeNull();
   });
 
-  it("resolves bindings case-insensitively and addresses by event id", async () => {
+  it("resolves bindings case-insensitively and manifest snapshots by event id", async () => {
     const { pool } = makePool();
     const m = signManifest(ALICE_PRIV, { d: "dash", blob: SHA_A, createdAt: 100 });
     await pool.storeArtifactManifest(m);
@@ -397,8 +396,43 @@ describe("getArtifactBlobBinding / getArtifactManifestAddress", () => {
     const binding = await pool.getArtifactBlobBinding(SHA_A.toUpperCase());
     expect(binding?.eventId).toBe(m.id);
 
-    const address = await pool.getArtifactManifestAddress(m.id);
-    expect(address).toEqual({ pubkey: ALICE_PUB, d: "dash" });
+    expect(await pool.getArtifactManifest(m.id)).toEqual(m);
+  });
+
+  it("keeps superseded manifest snapshots readable for the frozen render path", async () => {
+    // The full frozen-URL flow at DO level: sha256(A) → artifactblob binding
+    // → eventId=v1.id → getArtifactManifest(v1.id) returns v1 with its
+    // original metadata even though v2 replaced it at the address key —
+    // and v1's created_at (100) ≤ addr revocation (150) → 410, while the
+    // d-tag path renders v2 (200 > 150) → 200.
+    const { pool } = makePool();
+    const v1 = signManifest(ALICE_PRIV, { d: "dash", blob: SHA_A, createdAt: 100, title: "v1" });
+    const v2 = signManifest(ALICE_PRIV, { d: "dash", blob: SHA_B, createdAt: 200, title: "v2" });
+    await pool.storeArtifactManifest(v1);
+    await pool.storeArtifactManifest(v2);
+    const rev = signRevocation(ALICE_PRIV, { createdAt: 150, aTags: [`30540:${ALICE_PUB}:dash`] });
+    await pool.storeArtifactRevocation(rev, {
+      manifestIds: [],
+      addresses: [{ pubkey: ALICE_PUB, d: "dash" }],
+    });
+
+    const binding = await pool.getArtifactBlobBinding(SHA_A);
+    expect(binding?.eventId).toBe(v1.id);
+
+    const historical = await pool.getArtifactManifest(binding!.eventId);
+    expect(historical).toEqual(v1);
+    expect(historical!.tags).toContainEqual(["title", "v1"]);
+
+    const frozenCheck = await pool.getArtifactRevocation(
+      historical!.id,
+      historical!.pubkey,
+      "dash",
+      historical!.created_at,
+    );
+    expect(frozenCheck).toEqual({ revoked: true, by: ALICE_PUB, at: 150 });
+
+    const latestCheck = await pool.getArtifactRevocation(v2.id, ALICE_PUB, "dash", v2.created_at);
+    expect(latestCheck).toEqual({ revoked: false });
   });
 });
 
