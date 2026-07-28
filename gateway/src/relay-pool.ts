@@ -76,6 +76,16 @@ const RETRY_PUBLISH_TIMEOUT_MS = 5_000;
 
 const EVENT_PREFIX = "event:";
 const COMMONS_PREFIX = "event:30504:";
+// Public-artifact indexes (plan: public-artifacts-4a-api.md). Manifest events
+// themselves reuse EVENT_PREFIX keying (`event:30540:<pubkey>:<d>`); these
+// four prefixes hold the frozen-URL blob binding, the manifest-id → address
+// reverse index, and the kind:5 revocation marks (per-event and per-address).
+const ARTIFACT_BLOB_PREFIX = "artifactblob:";
+const ARTIFACT_ID_PREFIX = "artifactid:";
+const ARTIFACT_REV_PREFIX = "artifactrev:";
+const ARTIFACT_REV_ADDR_PREFIX = "artifactrevaddr:";
+const ARTIFACT_MANIFEST_KIND = 30540;
+const REVOCATION_KIND = 5;
 const RECONNECT_PREFIX = "reconnect:";
 const RETRY_PREFIX = "retry:";
 // Reverse index: invite_pub → {audIdPub, slug, status}. Maintained by
@@ -98,6 +108,34 @@ export interface NostrEvent {
   tags: string[][];
   content: string;
   sig: string;
+}
+
+// Value shape of `artifactblob:<sha256>` — the first-wins binding from a
+// blob to the (publisher, slug) whose manifest froze it. `createdAt` is the
+// binding manifest event's created_at, carried here because the manifest
+// event itself is replaceable: after a supersede the frozen render path
+// still needs the ORIGINAL manifest's timestamp for NIP-09 address-level
+// revocation comparison.
+export interface ArtifactBlobBinding {
+  pubkey: string;
+  d: string;
+  eventId: string;
+  createdAt: number;
+  boundAtMs: number;
+}
+
+// Value shape of `artifactid:<manifest-event-id>` — reverse index from a
+// manifest event id to its address, used by kind:5 e-tag resolution.
+export interface ArtifactManifestAddress {
+  pubkey: string;
+  d: string;
+}
+
+// Pre-resolved, pre-authorized targets of a kind:5 revocation. The endpoint
+// resolves e/a tags and enforces ownership; the DO only writes indexes.
+export interface ArtifactRevocationResolution {
+  manifestIds: string[];
+  addresses: { pubkey: string; d: string }[];
 }
 
 export interface QueryFilter {
@@ -528,6 +566,158 @@ export class RelayPool extends DurableObject<unknown> {
       if (out.length >= limit) break;
     }
     return out;
+  }
+
+  /**
+   * Store a kind:30540 artifact manifest after endpoint-side validation.
+   * Same sig/id/supersede discipline as storeAudienceEvent (30540 only —
+   * blake3/uploader/schema checks live in the manifest validator), plus the
+   * two artifact indexes:
+   *
+   *   - `artifactid:<event.id>` — always written; kept across supersedes so
+   *     kind:5 e-tag revocation can target old versions.
+   *   - `artifactblob:<sha256>` — FIRST-WINS. Written when absent; refreshed
+   *     (eventId/createdAt) when the existing binding has the same
+   *     (pubkey, d); left untouched otherwise, reported as `bound: false`
+   *     (the endpoint maps that to 409 blob_already_bound for the frozen-URL
+   *     claim — the manifest itself still stores fine).
+   */
+  async storeArtifactManifest(
+    event: NostrEvent,
+  ): Promise<{ ok: boolean; superseded: boolean; bound: boolean; reason?: string }> {
+    if (event.kind !== ARTIFACT_MANIFEST_KIND) {
+      return { ok: false, superseded: false, bound: false, reason: `kind must be ${ARTIFACT_MANIFEST_KIND}` };
+    }
+    if (canonicalEventId(event) !== event.id) {
+      return { ok: false, superseded: false, bound: false, reason: "id mismatch" };
+    }
+    if (!schnorr.verify(fromHex(event.sig), fromHex(event.id), fromHex(event.pubkey))) {
+      return { ok: false, superseded: false, bound: false, reason: "signature verification failed" };
+    }
+    const dTag = findTag(event.tags, "d");
+    if (!dTag) return { ok: false, superseded: false, bound: false, reason: "missing d tag" };
+    const blobSha = findTag(event.tags, "blob");
+    if (!blobSha || !/^[0-9a-f]{64}$/i.test(blobSha)) {
+      return { ok: false, superseded: false, bound: false, reason: "missing or malformed blob tag" };
+    }
+
+    const key = `${EVENT_PREFIX}${ARTIFACT_MANIFEST_KIND}:${event.pubkey}:${dTag}`;
+    const existing = await this.ctx.storage.get<NostrEvent>(key);
+    if (existing && existing.created_at >= event.created_at) {
+      return { ok: true, superseded: true, bound: false, reason: "superseded by existing newer event" };
+    }
+    await this.ctx.storage.put(key, event);
+    const address: ArtifactManifestAddress = { pubkey: event.pubkey, d: dTag };
+    await this.ctx.storage.put(`${ARTIFACT_ID_PREFIX}${event.id}`, address);
+
+    const blobKey = `${ARTIFACT_BLOB_PREFIX}${blobSha.toLowerCase()}`;
+    const binding = await this.ctx.storage.get<ArtifactBlobBinding>(blobKey);
+    let bound: boolean;
+    if (!binding) {
+      const fresh: ArtifactBlobBinding = {
+        pubkey: event.pubkey,
+        d: dTag,
+        eventId: event.id,
+        createdAt: event.created_at,
+        boundAtMs: Date.now(),
+      };
+      await this.ctx.storage.put(blobKey, fresh);
+      bound = true;
+    } else if (binding.pubkey === event.pubkey && binding.d === dTag) {
+      const refreshed: ArtifactBlobBinding = {
+        ...binding,
+        eventId: event.id,
+        createdAt: event.created_at,
+      };
+      await this.ctx.storage.put(blobKey, refreshed);
+      bound = true;
+    } else {
+      bound = false;
+    }
+    return { ok: true, superseded: false, bound };
+  }
+
+  /** Point read of the first-wins `artifactblob:<sha256>` binding. */
+  async getArtifactBlobBinding(sha: string): Promise<ArtifactBlobBinding | null> {
+    if (!/^[0-9a-f]{64}$/i.test(sha)) return null;
+    const binding = await this.ctx.storage.get<ArtifactBlobBinding>(
+      `${ARTIFACT_BLOB_PREFIX}${sha.toLowerCase()}`,
+    );
+    return binding ?? null;
+  }
+
+  /** Point read of the `artifactid:<manifest-event-id>` reverse index. */
+  async getArtifactManifestAddress(eventId: string): Promise<ArtifactManifestAddress | null> {
+    const address = await this.ctx.storage.get<ArtifactManifestAddress>(
+      `${ARTIFACT_ID_PREFIX}${eventId}`,
+    );
+    return address ?? null;
+  }
+
+  /**
+   * Store a kind:5 revocation against pre-resolved targets. The endpoint
+   * resolves e/a tags and enforces you-can-only-revoke-your-own; this method
+   * verifies the event itself and writes:
+   *
+   *   - `artifactrev:<manifest-event-id>` per resolved e-tag (unconditional —
+   *     version-level revocation has no time semantics).
+   *   - `artifactrevaddr:<pubkey>:<d>` per resolved a-tag, keeping the
+   *     latest-created_at kind:5 per address (an older revocation never
+   *     regresses a newer one).
+   */
+  async storeArtifactRevocation(
+    event: NostrEvent,
+    resolved: ArtifactRevocationResolution,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    if (event.kind !== REVOCATION_KIND) {
+      return { ok: false, reason: `kind must be ${REVOCATION_KIND}` };
+    }
+    if (canonicalEventId(event) !== event.id) {
+      return { ok: false, reason: "id mismatch" };
+    }
+    if (!schnorr.verify(fromHex(event.sig), fromHex(event.id), fromHex(event.pubkey))) {
+      return { ok: false, reason: "signature verification failed" };
+    }
+    for (const manifestId of resolved.manifestIds) {
+      await this.ctx.storage.put(`${ARTIFACT_REV_PREFIX}${manifestId}`, event);
+    }
+    for (const addr of resolved.addresses) {
+      const key = `${ARTIFACT_REV_ADDR_PREFIX}${addr.pubkey}:${addr.d}`;
+      const existing = await this.ctx.storage.get<NostrEvent>(key);
+      if (existing && existing.created_at >= event.created_at) continue;
+      await this.ctx.storage.put(key, event);
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Render-path revocation check — both index lookups in one DO round-trip.
+   * `manifestCreatedAt` is the created_at of the manifest actually being
+   * rendered (from the event for d-tag renders, from the ArtifactBlobBinding
+   * for frozen renders): NIP-09 address-level revocation suppresses exactly
+   * the manifests with created_at <= the revocation's, so a slug republished
+   * after the revocation un-revokes the d-tag URL while an older frozen
+   * version of the same slug stays 410.
+   */
+  async getArtifactRevocation(
+    manifestEventId: string,
+    pubkey: string,
+    d: string,
+    manifestCreatedAt: number,
+  ): Promise<{ revoked: boolean; by?: string; at?: number }> {
+    const direct = await this.ctx.storage.get<NostrEvent>(
+      `${ARTIFACT_REV_PREFIX}${manifestEventId}`,
+    );
+    if (direct) {
+      return { revoked: true, by: direct.pubkey, at: direct.created_at };
+    }
+    const addrRev = await this.ctx.storage.get<NostrEvent>(
+      `${ARTIFACT_REV_ADDR_PREFIX}${pubkey}:${d}`,
+    );
+    if (addrRev && manifestCreatedAt <= addrRev.created_at) {
+      return { revoked: true, by: addrRev.pubkey, at: addrRev.created_at };
+    }
+    return { revoked: false };
   }
 
   /**

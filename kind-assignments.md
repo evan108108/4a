@@ -24,6 +24,7 @@
 | **30520** | `fa:Audience` | Audience declaration: identity, current epoch, public roster | Addressable by `d` (audience slug) |
 | **30521** | `fa:KeyGrant` | NIP-44 v2 ciphertext delivering an audience epoch private key to one recipient | Addressable by composite `d` (`audience-slug:epoch:recipient-hex`) |
 | **30522** | `fa:AudienceClaim` | Off-band claim signed by an invite throwaway key, requesting a real key-grant | Addressable by composite `d` (`audience-slug:epoch:invite-pub-hex`) |
+| **30540** | `fa:ArtifactManifest` | Public artifact manifest: binds an uploaded Blossom blob (by sha256) to its publisher + slug with display metadata; the blob is client-side AES-256-GCM ciphertext, the manifest signer must be the blob's uploader | Addressable by `d` (artifact slug) |
 
 These numbers are **placeholders** chosen from an apparently unreserved block in the 30000 range. Before v0 ships the spec should either (a) submit a NIP reserving the block or (b) pick the first five contiguous unassigned slots in 30000–39999 after a fresh registry check against [nostr-protocol/nips](https://github.com/nostr-protocol/nips).
 
@@ -36,6 +37,8 @@ Known constraints that narrowed the choice:
 The 30500–30509 block reads unassigned at the time of writing. Reserve 30500–30519 to leave room for post-v0 kinds (pin declarations, aggregator rollups, response/reply objects) without fragmentation. Kinds **30506** (`fa:Score`) and **30507** (`fa:Comment`) are now defined; see [`SPEC.md` § Credibility events](./SPEC.md#credibility-events) for normative shape, paired-rationale rules, and supersession behavior.
 
 The encrypted-variant block (30510–30514) and the v0.5 audience block (30520, 30521, 30522) were assigned by [`SPEC-v0.5.md`](./SPEC-v0.5.md). The 30523–30529 range is reserved for future v0.5 audience-side metadata kinds; see [`SPEC-v0.5.md` § 8](./SPEC-v0.5.md#8-reserved-but-unused-kinds).
+
+The **30540–30549 range is reserved for artifact kinds**. Kind **30540** (`fa:ArtifactManifest`) is the Public Artifacts manifest: it marks an already-uploaded Blossom blob as a renderable artifact and binds `(publisher pubkey, slug)` → blob sha256. Artifact revocation deliberately reuses standard **kind:5** (NIP-09 deletion request) rather than a new kind. 30541–30549 are held for future artifact-side kinds (e.g. collection/gallery declarations) — implementations MUST NOT publish in that sub-range until a spec defines semantics. See the Public Artifacts plan (`public-artifacts-4a-api.md`) for normative manifest shape and validation rules.
 
 The **30530–30539 range is reserved for Sonata Studio kinds** (`fa:StudioCard`, `fa:StudioTrack`, `fa:StudioDispatchIntent`, `fa:StudioComment`, `fa:StudioQuestion`, `fa:StudioAnswer`, `fa:StudioRoom`, plus headroom). Studio is a 4A application built on top of v0.5 audiences — the kinds carry Studio-specific JSON-LD payloads (context: `https://sonata.4a4.ai/ns/studio-v0`) and are always audience-addressed (NIP-44 to the epoch pubkey, NIP-17 gift-wrapped per member). Normative shapes will be specified by the forthcoming `studio-v0` spec; this reservation only holds the kind block so v0.5-era work doesn't squat on it. See [`sonata-studio-v0-design.md`](/Users/evan/memory/claude/documents/evenflow/sonata-studio-v0-design.md) for the application-level design.
 
@@ -254,3 +257,4 @@ The encrypted-variant block 30510–30514 and the audience-management kinds 3052
 - 2026-04-24 — initial draft. Kinds assigned tentatively; subject to NIP review.
 - 2026-04-28 — Added kind 30506 (`fa:Score`) and kind 30507 (`fa:Comment`) for Phase 3 credibility events. Normative shape lives in [`SPEC.md` § Credibility events](./SPEC.md#credibility-events).
 - 2026-04-28 — Confirmed encrypted-variant kinds 30510–30514 and assigned v0.5 audience-management kinds 30520 (`fa:Audience`), 30521 (`fa:KeyGrant`), 30522 (`fa:AudienceClaim`). Reserved 30523–30529 for future v0.5 audience metadata. Normative shapes live in [`SPEC-v0.5.md`](./SPEC-v0.5.md).
+- 2026-07-28 — Assigned kind 30540 (`fa:ArtifactManifest`) for Public Artifacts and reserved 30540–30549 as the artifacts block, continuing the contiguous 4A range. Revocation of artifacts uses standard kind:5 (NIP-09) — no new kind assigned.
