@@ -30,16 +30,38 @@ import { signEventWithRawKey } from "../lib/sign";
 import { sha256Hex } from "../lib/blossom-auth";
 import { blake3ContentTag } from "../lib/blake3-tag";
 import { handleBlossomUpload } from "../blossom";
-import {
-  handleArtifactsRequest,
-  ARTIFACT_CSP,
-  type ArtifactBlobBinding,
-  type ArtifactPool,
-  type ArtifactsEnv,
-  type ResolvedRevocation,
-} from "../artifacts";
+import { handleArtifactsRequest, type ArtifactsEnv } from "../artifacts";
+import { ARTIFACT_VIEWER_CSP } from "../artifact-viewer";
 import { findTag } from "../artifact-manifest-validator";
-import type { NostrEvent } from "../relay-pool";
+import type {
+  ArtifactBlobBinding,
+  ArtifactRevocationResolution,
+  NostrEvent,
+} from "../relay-pool";
+
+// Test-side interface for the DO stub. The real endpoint code calls these
+// methods on `env.RELAY_POOL.get(id)` which returns a
+// `DurableObjectStub<RelayPool>`; here we describe the same surface with
+// plain Promises so the fake can implement it without pulling in the
+// Durable-Object machinery.
+interface ArtifactPool {
+  getObject(kind: number, pubkey: string, d: string): Promise<NostrEvent | null>;
+  storeArtifactManifest(
+    event: NostrEvent,
+  ): Promise<{ ok: boolean; superseded: boolean; bound: boolean; reason?: string }>;
+  getArtifactBlobBinding(sha256: string): Promise<ArtifactBlobBinding | null>;
+  getArtifactManifest(eventId: string): Promise<NostrEvent | null>;
+  storeArtifactRevocation(
+    event: NostrEvent,
+    resolved: ArtifactRevocationResolution,
+  ): Promise<{ ok: boolean; reason?: string }>;
+  getArtifactRevocation(
+    manifestEventId: string,
+    pubkey: string,
+    d: string,
+    manifestCreatedAt: number,
+  ): Promise<{ revoked: boolean; by?: string; at?: number }>;
+}
 
 // ── Test keys ───────────────────────────────────────────────────────────────
 
@@ -93,11 +115,18 @@ function makeFakePool(): FakePool {
       pool.manifestsById.set(event.id, event);
       const binding = pool.bindings.get(sha);
       if (!binding) {
-        pool.bindings.set(sha, { pubkey: event.pubkey, d, eventId: event.id, boundAtMs: 1 });
+        pool.bindings.set(sha, {
+          pubkey: event.pubkey,
+          d,
+          eventId: event.id,
+          createdAt: event.created_at,
+          boundAtMs: 1,
+        });
         return { ok: true, superseded: false, bound: true };
       }
       if (binding.pubkey === event.pubkey && binding.d === d) {
         binding.eventId = event.id; // refresh on same-(pubkey,d) republish
+        binding.createdAt = event.created_at;
         return { ok: true, superseded: false, bound: true };
       }
       return { ok: true, superseded: false, bound: false };
@@ -111,7 +140,7 @@ function makeFakePool(): FakePool {
       return pool.manifestsById.get(eventId) ?? null;
     },
 
-    async storeArtifactRevocation(event, resolved: ResolvedRevocation) {
+    async storeArtifactRevocation(event, resolved: ArtifactRevocationResolution) {
       for (const id of resolved.manifestIds) pool.revById.set(id, event);
       for (const { pubkey, d } of resolved.addresses) {
         const key = `${pubkey}:${d}`;
@@ -317,21 +346,21 @@ describe("scenario 1 — round-trip publish", () => {
     expect(pubBody.frozen_url).toBe(`https://api.4a4.ai/v0/artifacts/${sha}`);
     expect(pubBody.latest_url).toBe(`https://api.4a4.ai/v0/artifacts/${ALICE.pub}/q3-dashboard`);
 
-    for (const [path, mode] of [
-      [`/v0/artifacts/${sha}`, "frozen"],
-      [`/v0/artifacts/${ALICE.pub}/q3-dashboard`, "latest"],
+    for (const [path, frozen] of [
+      [`/v0/artifacts/${sha}`, true],
+      [`/v0/artifacts/${ALICE.pub}/q3-dashboard`, false],
     ] as const) {
       const res = await render(env, path);
       expect(res.status, path).toBe(200);
       // CSP exact-match, on every render response.
-      expect(res.headers.get("content-security-policy")).toBe(ARTIFACT_CSP);
+      expect(res.headers.get("content-security-policy")).toBe(ARTIFACT_VIEWER_CSP);
       expect(res.headers.get("cache-control")).toBe("public, max-age=30");
       const meta = await islandOf(res);
       expect(meta.sha256).toBe(sha);
       expect(meta.title).toBe("Q3 Pipeline Dashboard");
       expect(meta.pubkey).toBe(ALICE.pub);
       expect(meta.d).toBe("q3-dashboard");
-      expect(meta.mode).toBe(mode);
+      expect(meta.frozen).toBe(frozen);
       expect(meta.event_id).toBe(manifest.id);
     }
   });
@@ -521,7 +550,7 @@ describe("scenario 4 — replaceable supersede", () => {
     expect(frozenMeta.sha256).toBe(SHA_1);
     expect(frozenMeta.title).toBe("v1");
     expect(frozenMeta.event_id).toBe(v1.id);
-    expect(frozenMeta.mode).toBe("frozen");
+    expect(frozenMeta.frozen).toBe(true);
 
     // Publishing with an OLDER created_at reports superseded and changes nothing.
     const stale = manifestEvent(DAVE.priv, {
@@ -606,7 +635,7 @@ describe("scenario 6 — e-tag revocation", () => {
     for (const path of [`/v0/artifacts/${SHA_1}`, `/v0/artifacts/${ALICE.pub}/rev-e`]) {
       const r = await render(env, path);
       expect(r.status, path).toBe(410);
-      expect(r.headers.get("content-security-policy")).toBe(ARTIFACT_CSP);
+      expect(r.headers.get("content-security-policy")).toBe(ARTIFACT_VIEWER_CSP);
       const html = await r.text();
       expect(html).toContain(ALICE.pub); // attribution
     }
@@ -709,7 +738,7 @@ describe("render 404s", () => {
 
     const unbound = await render(env, `/v0/artifacts/${SHA_4}`);
     expect(unbound.status).toBe(404);
-    expect(unbound.headers.get("content-security-policy")).toBe(ARTIFACT_CSP);
+    expect(unbound.headers.get("content-security-policy")).toBe(ARTIFACT_VIEWER_CSP);
     expect((await render(env, `/v0/artifacts/${DAVE.pub}/nope`)).status).toBe(404);
 
     // Blob deleted after publish → 404 on render.

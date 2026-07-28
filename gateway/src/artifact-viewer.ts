@@ -49,6 +49,10 @@ export interface ArtifactViewerManifest {
   d?: string;
   /** true = frozen-content URL, false = latest-version URL. */
   frozen?: boolean;
+  /** Manifest event id (64-hex). Not displayed by the shell, but embedded in
+   *  the metadata island for auditing / debug / test assertions — lets a
+   *  reader confirm WHICH historical manifest a frozen URL is serving. */
+  event_id?: string;
 }
 
 /** The shell script served at GET /v0/artifacts/viewer.js. Plain ES5-ish JS,

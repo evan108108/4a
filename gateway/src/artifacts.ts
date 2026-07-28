@@ -26,8 +26,17 @@ import {
   validateArtifactManifest,
   type BlobLookup,
 } from "./artifact-manifest-validator";
-import { VIEWER_HTML, VIEWER_JS } from "./artifact-viewer";
-import type { NostrEvent, RelayPool } from "./relay-pool";
+import {
+  ARTIFACT_VIEWER_CSP,
+  renderViewerHtml,
+  VIEWER_JS,
+  type ArtifactViewerManifest,
+} from "./artifact-viewer";
+import type {
+  ArtifactRevocationResolution,
+  NostrEvent,
+  RelayPool,
+} from "./relay-pool";
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
@@ -41,62 +50,15 @@ const FROZEN_PATH = /^\/v0\/artifacts\/([0-9a-f]{64})$/;
 const LATEST_PATH = /^\/v0\/artifacts\/([0-9a-f]{64})\/([A-Za-z0-9_-]{1,64})$/;
 const ADDRESS_TAG = /^30540:([0-9a-f]{64}):([A-Za-z0-9_-]{1,64})$/;
 
-// Exact CSP from the plan (v1 single-origin). 'unsafe-inline' is load-bearing
-// for artifact content: a blob: iframe inherits this page's CSP (CSP3
-// local-scheme inheritance), so script-src 'self' alone would kill every
-// inline <script> in every published dashboard. The shell compensates by
-// having zero injection sinks (textContent-only INVARIANT, enforced by a
-// source-regex test) and an opaque-origin sandboxed iframe.
-export const ARTIFACT_CSP =
-  "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; " +
-  "img-src blob: data:; media-src blob: data:; font-src data:; frame-src blob:; " +
-  "connect-src 'self'; base-uri 'none'; form-action 'none'";
-
-// ── Task 1 interface contract (relay-pool.ts additions) ─────────────────────
-
-export interface ArtifactBlobBinding {
-  pubkey: string;
-  d: string;
-  eventId: string;
-  boundAtMs: number;
-}
-
-export interface ResolvedRevocation {
-  manifestIds: string[];
-  addresses: { pubkey: string; d: string }[];
-}
-
-export interface ArtifactPool {
-  getObject(kind: number, pubkey: string, d: string): Promise<NostrEvent | null>;
-  /** Also writes `artifactid:<event.id>` = the full event (historical snapshot). */
-  storeArtifactManifest(
-    event: NostrEvent,
-  ): Promise<{ ok: boolean; superseded: boolean; bound: boolean; reason?: string }>;
-  getArtifactBlobBinding(sha256: string): Promise<ArtifactBlobBinding | null>;
-  /** Historical manifest by event id — survives replaceable supersede. */
-  getArtifactManifest(eventId: string): Promise<NostrEvent | null>;
-  storeArtifactRevocation(
-    event: NostrEvent,
-    resolved: ResolvedRevocation,
-  ): Promise<{ ok: boolean; reason?: string }>;
-  getArtifactRevocation(
-    manifestEventId: string,
-    pubkey: string,
-    d: string,
-    manifestCreatedAt: number,
-  ): Promise<{ revoked: boolean; by?: string; at?: number }>;
-}
-
 export type ArtifactsEnv = {
   RELAY_POOL: DurableObjectNamespace<RelayPool>;
   STORAGE: R2Bucket;
 };
 
-// Task 1's methods aren't on the RelayPool type until impl/artifacts-foundation
-// lands — the cast is the seam the two branches meet at.
-function getPool(env: ArtifactsEnv): ArtifactPool {
-  const id = env.RELAY_POOL.idFromName("main");
-  return env.RELAY_POOL.get(id) as unknown as ArtifactPool;
+// The DO namespace stub proxies RelayPool's public methods with typed
+// signatures; the artifact methods live on RelayPool itself (relay-pool.ts).
+function getPool(env: ArtifactsEnv): DurableObjectStub<RelayPool> {
+  return env.RELAY_POOL.get(env.RELAY_POOL.idFromName("main"));
 }
 
 // ── Response helpers (webhook-receiver conventions) ─────────────────────────
@@ -113,7 +75,7 @@ const JSON_HEADERS: Record<string, string> = {
 const RENDER_HEADERS: Record<string, string> = {
   "Content-Type": "text/html; charset=utf-8",
   "Cache-Control": "public, max-age=30",
-  "Content-Security-Policy": ARTIFACT_CSP,
+  "Content-Security-Policy": ARTIFACT_VIEWER_CSP,
   "Access-Control-Allow-Origin": "*",
 };
 
@@ -307,7 +269,7 @@ async function handleRevoke(request: Request, env: ArtifactsEnv): Promise<Respon
   const pool = getPool(env);
   const revoked: string[][] = [];
   const skipped: { tag: string[]; reason: string }[] = [];
-  const resolved: ResolvedRevocation = { manifestIds: [], addresses: [] };
+  const resolved: ArtifactRevocationResolution = { manifestIds: [], addresses: [] };
 
   for (const tag of event.tags) {
     if (tag[0] === "e") {
@@ -364,18 +326,9 @@ async function handleRevoke(request: Request, env: ArtifactsEnv): Promise<Respon
 
 // ── GET /v0/artifacts/viewer.js ─────────────────────────────────────────────
 
-// Non-cryptographic content hash (djb2) — cache-busting only. Embedded in the
-// shell's script tag query param so a deploy that changes VIEWER_JS busts the
-// year-long immutable cache below.
-function contentHash(s: string): string {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) {
-    h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
-  }
-  return h.toString(16);
-}
-
-const VIEWER_JS_HASH = contentHash(VIEWER_JS);
+// The shell's script tag query param uses artifact-viewer.ts's own
+// VIEWER_JS_HASH (fnv1a of VIEWER_JS, computed at export time and pre-inlined
+// into VIEWER_HTML). Nothing to compute here.
 
 function handleViewerJs(request: Request): Response {
   if (request.method !== "GET") {
@@ -416,16 +369,24 @@ function renderShell(meta: {
   event_id: string;
   mode: "frozen" | "latest";
 }): Response {
-  // The single server-side interpolation: a JSON metadata island with `<`
-  // escaped so manifest strings can never close the script element. All
-  // display-time insertion happens in the shell via textContent (Task 3's
-  // INVARIANT, enforced there by a source-regex test).
-  const island = JSON.stringify(meta).replace(/</g, "\\u003c");
-  const html = VIEWER_HTML.replace("%%MANIFEST_JSON%%", island).replace(
-    "%%VIEWER_JS_HASH%%",
-    VIEWER_JS_HASH,
-  );
-  return new Response(html, { status: 200, headers: RENDER_HEADERS });
+  // Delegate to artifact-viewer.ts's renderViewerHtml — it does the JSON
+  // encoding (with `<` → < AND U+2028/U+2029 escapes) and slot
+  // substitution via a function-replacement, which sidesteps the String.replace
+  // `$&`/`$'`/`$\`` footgun that a string replacement would expose.
+  const viewerManifest: ArtifactViewerManifest = {
+    sha256: meta.sha256,
+    type: meta.type,
+    pubkey: meta.pubkey,
+    title: meta.title ?? undefined,
+    publishedAt: meta.created_at,
+    d: meta.d,
+    frozen: meta.mode === "frozen",
+    event_id: meta.event_id,
+  };
+  return new Response(renderViewerHtml(viewerManifest), {
+    status: 200,
+    headers: RENDER_HEADERS,
+  });
 }
 
 // Both URL shapes converge here once a manifest is resolved: revocation is
