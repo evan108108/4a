@@ -173,7 +173,13 @@ async function handleWhoami(request: Request, env: ProfileEnv): Promise<Response
     env,
   );
   secretKey.fill(0);
-  return jsonResponse({ pubkey: publicKey, npub: nip19.npubEncode(publicKey) });
+  // picture is the OAuth-provider avatar URL riding in the JWT (Google
+  // userinfo picture / GitHub avatar_url) — null on older tokens.
+  return jsonResponse({
+    pubkey: publicKey,
+    npub: nip19.npubEncode(publicKey),
+    picture: claims.picture ?? null,
+  });
 }
 
 async function handleProfileLookup(url: URL, env: ProfileEnv): Promise<Response> {

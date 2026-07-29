@@ -42,6 +42,10 @@ export interface AuthClaims {
   provider: string;
   oauth_id: string;
   login: string;
+  // Provider profile-picture URL (Google userinfo picture / GitHub
+  // avatar_url), unified under one key. Optional: absent on tokens minted
+  // before this claim existed and when the provider returns none.
+  picture?: string;
   iat: number;
   exp: number;
 }
@@ -75,12 +79,22 @@ const DEFAULT_REDIRECT_URI_PREFIXES = [
 
 const DCR_PREFIX = "dcr1_";
 
+// Claims-safe picture URL: https-only and bounded (matches the kind-0
+// publish cap), else dropped — a bad avatar URL must never block sign-in.
+const MAX_PICTURE_URL_LEN = 512;
+function claimsSafePicture(url: unknown): string | undefined {
+  return typeof url === "string" && url.startsWith("https://") && url.length <= MAX_PICTURE_URL_LEN
+    ? url
+    : undefined;
+}
+
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 interface ProviderUser {
   oauth_id: string;
   login: string;
+  picture?: string;
 }
 
 interface ProviderConfig {
@@ -137,11 +151,15 @@ const GITHUB: ProviderConfig = {
     };
   },
   parseUserInfo(payload) {
-    const user = payload as { id?: number; login?: string };
+    const user = payload as { id?: number; login?: string; avatar_url?: string };
     if (typeof user.id !== "number" || typeof user.login !== "string") {
       throw new Error("github /user returned unexpected payload");
     }
-    return { oauth_id: String(user.id), login: user.login };
+    return {
+      oauth_id: String(user.id),
+      login: user.login,
+      picture: claimsSafePicture(user.avatar_url),
+    };
   },
 };
 
@@ -177,11 +195,15 @@ const GOOGLE: ProviderConfig = {
     };
   },
   parseUserInfo(payload) {
-    const user = payload as { sub?: string; email?: string };
+    const user = payload as { sub?: string; email?: string; picture?: string };
     if (typeof user.sub !== "string" || typeof user.email !== "string") {
       throw new Error("google userinfo returned unexpected payload");
     }
-    return { oauth_id: user.sub, login: user.email };
+    return {
+      oauth_id: user.sub,
+      login: user.email,
+      picture: claimsSafePicture(user.picture),
+    };
   },
 };
 
@@ -269,14 +291,20 @@ async function verifySignedToken<T>(token: string, env: AuthEnv): Promise<T | nu
 // ── JWT (downstream API access token) ──────────────────────────────────────
 
 export async function mintJwt(
-  claims: Pick<AuthClaims, "provider" | "oauth_id" | "login"> & { iat?: number; exp?: number },
+  claims: Pick<AuthClaims, "provider" | "oauth_id" | "login"> & {
+    picture?: string;
+    iat?: number;
+    exp?: number;
+  },
   env: AuthEnv,
 ): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
+  const picture = claimsSafePicture(claims.picture);
   const full: AuthClaims = {
     provider: claims.provider,
     oauth_id: claims.oauth_id,
     login: claims.login,
+    ...(picture === undefined ? {} : { picture }),
     iat: claims.iat ?? now,
     exp: claims.exp ?? now + JWT_TTL_SECONDS,
   };
@@ -325,6 +353,9 @@ export async function verifyJwt(token: string, env: AuthEnv): Promise<AuthClaims
     typeof claims.iat !== "number" ||
     typeof claims.exp !== "number"
   ) return null;
+  if (claims.picture !== undefined && claimsSafePicture(claims.picture) === undefined) {
+    delete (claims as { picture?: string }).picture;
+  }
   if (claims.exp <= Math.floor(Date.now() / 1000)) return null;
   return claims;
 }
@@ -398,6 +429,7 @@ interface AuthCodeToken {
   exp: number;
   oid: string; // oauth_id
   lg: string;  // login
+  pic?: string; // provider profile-picture URL (carried into the minted JWT)
   ru: string;  // redirect_uri (must match at /auth/token)
   ci: string;  // client_id (must match at /auth/token)
   cc?: string; // PKCE code_challenge
@@ -730,6 +762,7 @@ async function callbackProvider(
         prov: provider.name,
         oid: user.oauth_id,
         lg: user.login,
+        ...(user.picture ? { pic: user.picture } : {}),
         ru: state.ru,
         ci: state.ci,
         ...(state.cc ? { cc: state.cc, cm: state.cm ?? "S256" } : {}),
@@ -744,13 +777,13 @@ async function callbackProvider(
 
   // Direct flow (legacy / power-user)
   const token = await mintJwt(
-    { provider: provider.name, oauth_id: user.oauth_id, login: user.login },
+    { provider: provider.name, oauth_id: user.oauth_id, login: user.login, picture: user.picture },
     env,
   );
   return new Response(
     JSON.stringify({
       token,
-      user: { provider: provider.name, id: user.oauth_id, login: user.login },
+      user: { provider: provider.name, id: user.oauth_id, login: user.login, picture: user.picture ?? null },
     }),
     {
       status: 200,
@@ -846,7 +879,7 @@ async function tokenEndpoint(request: Request, env: AuthEnv): Promise<Response> 
   }
 
   const accessToken = await mintJwt(
-    { provider: authCode.prov, oauth_id: authCode.oid, login: authCode.lg },
+    { provider: authCode.prov, oauth_id: authCode.oid, login: authCode.lg, picture: authCode.pic },
     env,
   );
 
