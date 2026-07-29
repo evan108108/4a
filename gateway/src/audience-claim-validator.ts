@@ -34,6 +34,14 @@ export function validateAudienceClaimEvent(
     return { ok: false, error: `kind must be ${KIND_AUDIENCE_CLAIM}, got ${event.kind}` };
   }
 
+  // Dispatch on fa:status: leave claims have a different d-tag shape and are
+  // signed by the leaving member's identity key (not invite_priv). See
+  // sonata-studio-room-lifecycle.md §5.4.
+  const statusTag = findTag(event.tags, "fa:status");
+  if (statusTag === "left") {
+    return validateLeaveClaimEvent(event, lookup);
+  }
+
   const dTag = findTag(event.tags, "d");
   if (!dTag) return { ok: false, error: 'tag "d" missing' };
   const dParts = dTag.split(":");
@@ -146,6 +154,145 @@ export function validateAudienceClaimEvent(
       return {
         ok: false,
         error: "signing pubkey is not a fa:pending invite on the current declaration",
+      };
+    }
+  }
+
+  return { ok: true };
+}
+
+/**
+ * Validate a kind:30522 event whose `fa:status` tag is "left". Per
+ * sonata-studio-room-lifecycle.md §5.4, leave claims:
+ *   1. Have a d-tag of the form `<slug>:<epoch>:left:<member_pubkey>`.
+ *   2. Are signed by the leaving member's identity key (NOT invite_priv).
+ *   3. Reference a member who is in the current declaration's roster.
+ *   4. Carry `fa:claim-pubkey` matching the signing pubkey.
+ */
+export function validateLeaveClaimEvent(
+  event: NostrEvent,
+  lookup: AudienceLookup,
+): ValidationResult {
+  if (event.kind !== KIND_AUDIENCE_CLAIM) {
+    return { ok: false, error: `kind must be ${KIND_AUDIENCE_CLAIM}, got ${event.kind}` };
+  }
+  const dTag = findTag(event.tags, "d");
+  if (!dTag) return { ok: false, error: 'tag "d" missing' };
+  // Leave d-tag shape: <slug>:<epoch>:left:<member_pubkey>
+  const dParts = dTag.split(":");
+  if (dParts.length !== 4) {
+    return {
+      ok: false,
+      error: '"d" must be "<slug>:<epoch>:left:<member-pubkey-hex>" for leave claims',
+    };
+  }
+  const [dSlug, dEpoch, dMarker, dMemberPub] = dParts as [string, string, string, string];
+  if (!/^[A-Za-z0-9-]+$/.test(dSlug)) {
+    return { ok: false, error: '"d" slug invalid' };
+  }
+  if (!/^[1-9]\d*$/.test(dEpoch)) {
+    return { ok: false, error: '"d" epoch must be a positive integer' };
+  }
+  if (dMarker !== "left") {
+    return { ok: false, error: '"d" leave marker must be literal "left"' };
+  }
+  if (!HEX64.test(dMemberPub)) {
+    return { ok: false, error: '"d" member-pubkey must be 32-byte hex' };
+  }
+
+  const faContext = findTag(event.tags, "fa:context");
+  if (faContext !== FA_CONTEXT_V0) {
+    return { ok: false, error: `fa:context must equal "${FA_CONTEXT_V0}"` };
+  }
+  const altTag = findTag(event.tags, "alt");
+  if (!altTag || altTag.length === 0) {
+    return { ok: false, error: 'tag "alt" missing or empty' };
+  }
+  const aTag = findTag(event.tags, "a");
+  if (!aTag || !ADDRESS_PATTERN.test(aTag)) {
+    return { ok: false, error: '"a" tag must match 30520:<aud_id-hex>:<slug>' };
+  }
+  const epochTag = findTag(event.tags, "fa:epoch");
+  if (!epochTag || !/^[1-9]\d*$/.test(epochTag)) {
+    return { ok: false, error: '"fa:epoch" must be a positive integer' };
+  }
+  const epoch = Number(epochTag);
+  if (epoch !== Number(dEpoch)) {
+    return {
+      ok: false,
+      error: `fa:epoch (${epoch}) does not match d-tag epoch (${dEpoch})`,
+    };
+  }
+  const claimPubTag = findTag(event.tags, "fa:claim-pubkey");
+  if (!claimPubTag || !HEX64.test(claimPubTag)) {
+    return { ok: false, error: '"fa:claim-pubkey" must be 32-byte hex' };
+  }
+  if (claimPubTag.toLowerCase() !== dMemberPub.toLowerCase()) {
+    return {
+      ok: false,
+      error: 'fa:claim-pubkey must match the member-pubkey component of "d"',
+    };
+  }
+
+  // Signing pubkey must equal the leaving member's identity key.
+  if (event.pubkey.toLowerCase() !== claimPubTag.toLowerCase()) {
+    return {
+      ok: false,
+      error: "leave claim must be signed by the leaving member's identity key",
+    };
+  }
+
+  // Content JSON-LD.
+  let body: unknown;
+  try {
+    body = JSON.parse(event.content);
+  } catch (err) {
+    return {
+      ok: false,
+      error: `content is not valid JSON: ${err instanceof Error ? err.message : err}`,
+    };
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { ok: false, error: "content must be a JSON object" };
+  }
+  const obj = body as Record<string, unknown>;
+  if (obj["@context"] !== FA_CONTEXT_V0) {
+    return { ok: false, error: 'content."@context" must equal the v0 context URL' };
+  }
+  if (obj["@type"] !== "AudienceClaim") {
+    return { ok: false, error: 'content."@type" must be "AudienceClaim"' };
+  }
+  if (obj.audience !== dSlug) {
+    return { ok: false, error: "content.audience must equal the d-tag slug" };
+  }
+  if (typeof obj.epoch !== "number" || obj.epoch !== epoch) {
+    return { ok: false, error: "content.epoch must equal the fa:epoch tag" };
+  }
+  if (
+    typeof obj.claimPubkey !== "string" ||
+    obj.claimPubkey.toLowerCase() !== claimPubTag.toLowerCase()
+  ) {
+    return { ok: false, error: "content.claimPubkey must equal the fa:claim-pubkey tag" };
+  }
+  if (obj.status !== "left") {
+    return { ok: false, error: 'content.status must be "left"' };
+  }
+
+  // Cross-event: leaving member must currently be in the roster. Lets the
+  // gateway reject replay attacks (event from an already-removed pubkey) and
+  // the §5.4 "leave-while-booted" race when boot lands first.
+  if (lookup.currentDeclarationByAddress) {
+    const decl = lookup.currentDeclarationByAddress(aTag);
+    if (!decl) {
+      return { ok: false, error: '"a" tag does not resolve to a known kind:30520 declaration' };
+    }
+    const isMember = decl.members.some(
+      (m) => m.toLowerCase() === claimPubTag.toLowerCase(),
+    );
+    if (!isMember) {
+      return {
+        ok: false,
+        error: "not_current_member",
       };
     }
   }

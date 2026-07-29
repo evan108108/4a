@@ -22,6 +22,7 @@ import {
   type KmsEnv,
   type SignedEvent,
 } from "./kms";
+import { buildProfile, ProfileValidationError, type ProfileBody } from "./profile-builder";
 import { classifyRejection, RELAYS, type RelayPool } from "./relay-pool";
 
 export type PublishEnv = AuthEnv & KmsEnv & {
@@ -501,7 +502,7 @@ function arrayOfNonEmptyStrings(value: unknown, field: string): string[] {
 
 // ─── core dispatch ──────────────────────────────────────────────────────────
 
-export type Kind = "observation" | "claim" | "entity" | "relation" | "attest";
+export type Kind = "observation" | "claim" | "entity" | "relation" | "attest" | "profile";
 
 function dispatchKind(kind: Kind, body: Record<string, unknown>, pubkey: string): BuiltEvent {
   switch (kind) {
@@ -510,6 +511,7 @@ function dispatchKind(kind: Kind, body: Record<string, unknown>, pubkey: string)
     case "entity":      return buildEntity(body as unknown as EntityBody);
     case "relation":    return buildRelation(body as unknown as RelationBody, pubkey);
     case "attest":      return buildAttest(body as unknown as AttestBody);
+    case "profile":     return buildProfile(body as unknown as ProfileBody);
   }
 }
 
@@ -616,7 +618,7 @@ export async function runPublish(
       relayResults,
     };
   } catch (err) {
-    if (err instanceof ValidationError) {
+    if (err instanceof ValidationError || err instanceof ProfileValidationError) {
       return { ok: false, status: 400, error: "bad_request", message: err.message };
     }
     return {
@@ -676,6 +678,7 @@ export async function handlePublishRequest(request: Request, env: PublishEnv): P
   if (path === "/v0/publish/claim")       return handleKind("claim",       request, env);
   if (path === "/v0/publish/entity")      return handleKind("entity",      request, env);
   if (path === "/v0/publish/relation")    return handleKind("relation",    request, env);
+  if (path === "/v0/publish/profile")     return handleKind("profile",     request, env);
   if (path === "/v0/attest")              return handleKind("attest",      request, env);
   return jsonError("not_found", `unknown publish path: ${path}`, 404);
 }

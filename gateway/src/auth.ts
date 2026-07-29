@@ -70,6 +70,7 @@ const DEFAULT_REDIRECT_URI_PREFIXES = [
   "https://chatgpt.com/aip/",
   "https://claude.ai/",
   "https://claude.com/",
+  "https://evenflow.work/",
 ];
 
 const DCR_PREFIX = "dcr1_";

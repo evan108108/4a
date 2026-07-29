@@ -56,6 +56,18 @@ export interface AudienceDeclaration {
   members: string[];
   /** Outstanding pending invite pubkeys (parsed from `fa:pending`). */
   pending: { invitePub: string; expirationUnix: number }[];
+  /**
+   * Room lifecycle status from `fa:status` (sonata-studio-room-lifecycle.md
+   * §4.1). Absence means "active"; only "closed" is significant. Unknown
+   * values fall back to "active" so future status flavors don't break the
+   * legacy guard.
+   */
+  status: "active" | "closed";
+  /**
+   * Unix-seconds timestamp at which the founder closed the room. Parsed
+   * from `fa:closed-at`; only meaningful when `status === "closed"`.
+   */
+  closedAt?: number;
 }
 
 function findTag(tags: string[][], name: string): string | undefined {
@@ -73,6 +85,18 @@ function nowSec(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+export interface ParseDeclarationOptions {
+  /**
+   * Drop `fa:pending` entries whose expiration is in the past instead of
+   * rejecting the whole declaration. Read paths (stream, status, lookups) set
+   * this `true`: a lapsed invite is a normal lifecycle state, and the cached
+   * declaration is immutable until republished — a single expired invite must
+   * not 500 every member's stream. Publish-time validation leaves it `false`
+   * (strict) so an already-dead invite is still rejected at issuance.
+   */
+  dropExpiredPending?: boolean;
+}
+
 /**
  * Parse a `kind:30520` event into a structured declaration. Returns
  * `{ ok: false, error }` on the same conditions that `validateAudienceEvent`
@@ -81,6 +105,7 @@ function nowSec(): number {
  */
 export function parseAudienceDeclaration(
   event: NostrEvent,
+  opts: ParseDeclarationOptions = {},
 ):
   | { ok: true; value: AudienceDeclaration }
   | { ok: false; error: string } {
@@ -144,6 +169,9 @@ export function parseAudienceDeclaration(
       return { ok: false, error: '"fa:pending" expiration must be an integer unix timestamp' };
     }
     if (expirationUnix <= nowSec()) {
+      // Read paths drop the lapsed invite; publish-time validation rejects it.
+      // See ParseDeclarationOptions.dropExpiredPending.
+      if (opts.dropExpiredPending) continue;
       return { ok: false, error: '"fa:pending" expiration is in the past' };
     }
     pending.push({ invitePub, expirationUnix });
@@ -173,17 +201,31 @@ export function parseAudienceDeclaration(
     return { ok: false, error: "content.epoch must equal the fa:epoch tag" };
   }
 
-  return {
-    ok: true,
-    value: {
-      audIdPub: event.pubkey,
-      slug: dTag,
-      epoch,
-      epochPub,
-      members,
-      pending,
-    },
+  // Room-lifecycle status tags (fa:status, fa:closed-at). Absence ≡ active
+  // per §3.1; unknown values likewise fall back to active so the validator
+  // stays permissive for forward-compat.
+  let status: "active" | "closed" = "active";
+  let closedAt: number | undefined;
+  for (const t of event.tags) {
+    if (t[0] === "fa:status") {
+      if (t[1] === "closed") status = "closed";
+    } else if (t[0] === "fa:closed-at") {
+      const n = Number(t[1]);
+      if (Number.isFinite(n) && n > 0) closedAt = n;
+    }
+  }
+
+  const value: AudienceDeclaration = {
+    audIdPub: event.pubkey,
+    slug: dTag,
+    epoch,
+    epochPub,
+    members,
+    pending,
+    status,
   };
+  if (closedAt !== undefined) value.closedAt = closedAt;
+  return { ok: true, value };
 }
 
 /**

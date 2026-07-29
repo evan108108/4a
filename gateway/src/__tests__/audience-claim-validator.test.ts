@@ -58,6 +58,7 @@ const lookup: AudienceLookup = {
           epochPub: "b".repeat(64),
           members: ["m".repeat(64)],
           pending: [{ invitePub: INVITE_PUB, expirationUnix: FUTURE }],
+          status: "active",
         }
       : undefined,
 };
@@ -83,6 +84,7 @@ describe("validateAudienceClaimEvent", () => {
         epochPub: "b".repeat(64),
         members: [],
         pending: [],
+        status: "active",
       }),
     });
     expect(r.ok).toBe(false);

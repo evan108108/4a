@@ -66,6 +66,7 @@ const lookup: AudienceLookup = {
           epochPub: EPOCH_PUB,
           members: [MEMBER_1, MEMBER_2],
           pending: [],
+          status: "active",
         }
       : undefined,
 };

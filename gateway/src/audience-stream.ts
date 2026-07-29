@@ -80,7 +80,12 @@ export interface StreamConfig {
   livePollMs: number;
   /** Keepalive comment interval (ms). Must be < proxy idle threshold. */
   keepaliveMs: number;
-  /** Declaration re-poll interval (ms) for epoch-rotated detection. */
+  /** Declaration re-poll interval (ms). Surfaces epoch rotations AND
+   * close/reopen/boot status transitions to subscribed members. Originally
+   * 5 min on the assumption that declarations changed rarely (epoch
+   * rotations only); the room-lifecycle work makes declaration republishes
+   * a regular event (close, reopen, boot), so the cadence is matched to
+   * `livePollMs` to keep member-side state in sync within a couple seconds. */
   epochPollMs: number;
   /** Max events drained per live-tail cycle (per source). */
   livePollLimit: number;
@@ -89,7 +94,7 @@ export interface StreamConfig {
 export const DEFAULT_STREAM_CONFIG: StreamConfig = {
   livePollMs: 2_000,
   keepaliveMs: 25_000,
-  epochPollMs: 5 * 60 * 1000,
+  epochPollMs: 5_000,
   livePollLimit: 100,
 };
 
@@ -192,7 +197,7 @@ export async function handleAudienceStreamRequest(
   if (!declEvent) {
     return jsonError("not_found", "audience declaration not found in relay cache", 404);
   }
-  const declParsed = parseAudienceDeclaration(declEvent);
+  const declParsed = parseAudienceDeclaration(declEvent, { dropExpiredPending: true });
   if (!declParsed.ok) {
     return jsonError("internal_error", `cached declaration invalid: ${declParsed.error}`, 500);
   }
@@ -388,7 +393,7 @@ export async function handleAudienceStreamRequest(
         if (Date.now() - lastEpochPoll >= config.epochPollMs) {
           const cur = await stub.getObject(30520, audIdPub.toLowerCase(), slug);
           if (cur) {
-            const parsed = parseAudienceDeclaration(cur);
+            const parsed = parseAudienceDeclaration(cur, { dropExpiredPending: true });
             if (parsed.ok) {
               if (cur.id !== lastDeclId) {
                 if (closed) return;
