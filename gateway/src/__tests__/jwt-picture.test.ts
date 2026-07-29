@@ -3,6 +3,12 @@
 
 import { describe, expect, it } from "vitest";
 import { mintJwt, verifyJwt, type AuthEnv } from "../auth";
+// Base64url helpers — kept runtime-agnostic (no node Buffer types in this workers-typed project).
+const fromB64url = (s: string): string => atob(s.replaceAll("-", "+").replaceAll("_", "/"));
+const toB64url = (s: string | Uint8Array): string => {
+  const bin = typeof s === "string" ? s : String.fromCharCode(...s);
+  return btoa(bin).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+};
 
 const env: AuthEnv = { JWT_SIGNING_KEY: "test-signing-secret" };
 const BASE = { provider: "github", oauth_id: "42", login: "octocat" };
@@ -41,9 +47,9 @@ describe("picture claim", () => {
     // minted by an older/other implementation) but a valid signature.
     const good = await mintJwt(BASE, env);
     const [h, p, _s] = good.split(".");
-    const payload = JSON.parse(Buffer.from(p!, "base64url").toString());
+    const payload = JSON.parse(fromB64url(p!));
     payload.picture = "javascript:alert(1)";
-    const forgedPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
+    const forgedPayload = toB64url(JSON.stringify(payload));
     // Re-sign properly via WebCrypto with the same secret.
     const key = await crypto.subtle.importKey(
       "raw",
@@ -55,7 +61,7 @@ describe("picture claim", () => {
     const sig = new Uint8Array(
       await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${h}.${forgedPayload}`)),
     );
-    const sigB64 = Buffer.from(sig).toString("base64url");
+    const sigB64 = toB64url(sig);
     const claims = await verifyJwt(`${h}.${forgedPayload}.${sigB64}`, env);
     expect(claims).not.toBeNull();
     expect(claims?.picture).toBeUndefined();
