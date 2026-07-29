@@ -27,6 +27,7 @@ import { handleBlossomRequest } from "./blossom";
 import { handleCommentRequest } from "./comment";
 import { handleMcpRequest } from "./mcp";
 import type { McpHub } from "./mcp";
+import { handleProfileApiRequest } from "./profile";
 import { handlePublishRequest } from "./publish";
 import type { RelayPool } from "./relay-pool";
 import { handleScoreRequest } from "./score";
@@ -76,6 +77,9 @@ export default {
       }
       if (url.pathname.startsWith("/auth/")) {
         return handleAuthRequest(request, env);
+      }
+      if (url.pathname === "/v0/profile" || url.pathname === "/v0/whoami") {
+        return handleProfileApiRequest(request, env);
       }
       if (url.pathname.startsWith("/v0/publish/") || url.pathname === "/v0/attest") {
         return handlePublishRequest(request, env);
