@@ -23,6 +23,15 @@ import {
   type SignedEvent,
 } from "./kms";
 import { buildProfile, ProfileValidationError, type ProfileBody } from "./profile-builder";
+import {
+  buildGrant,
+  buildGrantRevoke,
+  buildOrg,
+  OrgValidationError,
+  type GrantBody,
+  type GrantRevokeBody,
+  type OrgBody,
+} from "./org-builder";
 import { classifyRejection, RELAYS, type RelayPool } from "./relay-pool";
 
 export type PublishEnv = AuthEnv & KmsEnv & {
@@ -502,16 +511,28 @@ function arrayOfNonEmptyStrings(value: unknown, field: string): string[] {
 
 // ─── core dispatch ──────────────────────────────────────────────────────────
 
-export type Kind = "observation" | "claim" | "entity" | "relation" | "attest" | "profile";
+export type Kind =
+  | "observation"
+  | "claim"
+  | "entity"
+  | "relation"
+  | "attest"
+  | "profile"
+  | "org"
+  | "grant"
+  | "grant_revoke";
 
 function dispatchKind(kind: Kind, body: Record<string, unknown>, pubkey: string): BuiltEvent {
   switch (kind) {
-    case "observation": return buildObservation(body as unknown as ObservationBody, pubkey);
-    case "claim":       return buildClaim(body as unknown as ClaimBody, pubkey);
-    case "entity":      return buildEntity(body as unknown as EntityBody);
-    case "relation":    return buildRelation(body as unknown as RelationBody, pubkey);
-    case "attest":      return buildAttest(body as unknown as AttestBody);
-    case "profile":     return buildProfile(body as unknown as ProfileBody);
+    case "observation":  return buildObservation(body as unknown as ObservationBody, pubkey);
+    case "claim":        return buildClaim(body as unknown as ClaimBody, pubkey);
+    case "entity":       return buildEntity(body as unknown as EntityBody);
+    case "relation":     return buildRelation(body as unknown as RelationBody, pubkey);
+    case "attest":       return buildAttest(body as unknown as AttestBody);
+    case "profile":      return buildProfile(body as unknown as ProfileBody);
+    case "org":          return buildOrg(body as unknown as OrgBody);
+    case "grant":        return buildGrant(body as unknown as GrantBody);
+    case "grant_revoke": return buildGrantRevoke(body as unknown as GrantRevokeBody);
   }
 }
 
@@ -618,7 +639,11 @@ export async function runPublish(
       relayResults,
     };
   } catch (err) {
-    if (err instanceof ValidationError || err instanceof ProfileValidationError) {
+    if (
+      err instanceof ValidationError ||
+      err instanceof ProfileValidationError ||
+      err instanceof OrgValidationError
+    ) {
       return { ok: false, status: 400, error: "bad_request", message: err.message };
     }
     return {
@@ -679,6 +704,9 @@ export async function handlePublishRequest(request: Request, env: PublishEnv): P
   if (path === "/v0/publish/entity")      return handleKind("entity",      request, env);
   if (path === "/v0/publish/relation")    return handleKind("relation",    request, env);
   if (path === "/v0/publish/profile")     return handleKind("profile",     request, env);
+  if (path === "/v0/publish/org")          return handleKind("org",          request, env);
+  if (path === "/v0/publish/grant")        return handleKind("grant",        request, env);
+  if (path === "/v0/publish/grant_revoke") return handleKind("grant_revoke", request, env);
   if (path === "/v0/attest")              return handleKind("attest",      request, env);
   return jsonError("not_found", `unknown publish path: ${path}`, 404);
 }
