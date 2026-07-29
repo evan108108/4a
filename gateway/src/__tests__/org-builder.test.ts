@@ -105,7 +105,9 @@ describe("buildGrant", () => {
       scope: "org",
       target: "acme",
     });
-    expect(tag(built.template.tags, "p")).toBe("google:999");
+    // Composites can't ride a `p` tag — relays enforce hex64 there.
+    expect(tag(built.template.tags, "p")).toBeUndefined();
+    expect(tag(built.template.tags, "fa:recipient")).toBe("google:999");
   });
 
   it("enforces target shape per scope: org = one segment, board = two", () => {

@@ -183,13 +183,21 @@ export function buildGrant(body: GrantBody): BuiltOrgEvent {
   // per target. Role changes republish the same address.
   const dTag = `${target}/${recipient}`;
 
+  // Relays enforce hex64 on `p` tags (fixed-size), so only real pubkeys ride
+  // one; composite provider:oauth_id stand-ins (recipients who have never
+  // signed in) carry `fa:recipient` instead. Reconciliation on first sign-in
+  // re-grants against the derived hex key.
+  const recipientTag: string[] = HEX64.test(recipient)
+    ? ["p", recipient]
+    : ["fa:recipient", recipient];
+
   return {
     template: {
       kind: KIND_GRANT,
       created_at: nowSec(),
       tags: [
         ["d", dTag],
-        ["p", recipient],
+        recipientTag,
         ["role", role],
         ["scope", scope],
         ["target", target],
