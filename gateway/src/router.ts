@@ -30,6 +30,7 @@ import { handleInboxStream } from "./inbox-stream";
 import { handleCommentRequest } from "./comment";
 import { handleMcpRequest } from "./mcp";
 import type { McpHub } from "./mcp";
+import { handleBlobRequest } from "./blob";
 import { handleProfileApiRequest } from "./profile";
 import { handlePublishRequest } from "./publish";
 import type { RelayPool } from "./relay-pool";
@@ -92,6 +93,9 @@ export default {
       }
       if (url.pathname === "/v0/comment") {
         return handleCommentRequest(request, env);
+      }
+      if (url.pathname === "/v0/blob") {
+        return handleBlobRequest(request, env);
       }
       if (url.pathname.startsWith("/blossom/")) {
         return handleBlossomRequest(request, env);
