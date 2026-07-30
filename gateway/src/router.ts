@@ -22,6 +22,7 @@ import {
 import { handleAudienceRequest } from "./audience";
 import { handleAudienceByInvitePubRequest } from "./audience-by-invite-pub";
 import { handleAudienceRawRequest } from "./audience-raw";
+import { handleKanbanTideRequest, KANBAN_TIDE_PATH } from "./kanban-tide-route";
 import { handleAudienceStreamRequest } from "./audience-stream";
 import { handleBlossomRequest } from "./blossom";
 import { handleArtifactsRequest } from "./artifacts";
@@ -102,6 +103,11 @@ export default {
       }
       if (url.pathname.startsWith("/v0/audience/raw/")) {
         return handleAudienceRawRequest(request, env);
+      }
+      // Sits above the /v0/publish/ block on purpose: this one path is
+      // NIP-98-authed and caller-signed, not JWT + KMS like its siblings.
+      if (url.pathname === KANBAN_TIDE_PATH) {
+        return handleKanbanTideRequest(request, env);
       }
       // Webhook-relay ingress: POST /v0/hook/:pubkey/:slug — public,
       // unauthenticated by design (third parties can't sign NIP-98);

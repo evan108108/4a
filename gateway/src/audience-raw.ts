@@ -122,7 +122,7 @@ function requireHex64(raw: unknown, field: string): string {
  * same well-formedness checks the relay-pool DO would (canonical id +
  * schnorr sig) so we surface caller bugs as 400 instead of 502.
  */
-function requireSignedEvent(raw: unknown, field: string): SignedEvent {
+export function requireSignedEvent(raw: unknown, field: string): SignedEvent {
   const obj = requireObject(raw, field);
   if (typeof obj.id !== "string" || !HEX64.test(obj.id)) {
     throw new RawValidationError("bad_request", `${field}.id must be 32-byte hex`);
@@ -242,7 +242,7 @@ interface PublishOutcome {
   accepted: boolean;
 }
 
-async function publishAndStore(
+export async function publishAndStore(
   signed: SignedEvent,
   env: AudienceRawEnv,
 ): Promise<PublishOutcome> {
