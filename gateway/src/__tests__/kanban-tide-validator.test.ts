@@ -104,6 +104,44 @@ describe("validateKanbanTideEvent — accepts", () => {
   });
 });
 
+describe("cross-repo contract", () => {
+  // Captured verbatim from evenflow's buildSprintTide (lib/audience/
+  // audience-events.ts). Evenflow builds and signs; this repo only checks —
+  // so the two hold the shape independently and drift is a silent 400 in
+  // production. Regenerate by logging a built template on the evenflow side.
+  const GOLDEN: TideEventLike = {
+    kind: 30560,
+    tags: [
+      ["d", "01e70cc9-0aaa-4ca9-88d4-ea897f42685e:2026-07-29"],
+      ["fa:context", "https://4a4.ai/ns/v0"],
+      ["alt", "Tide 2026-07-29: 5 of 11 pts remaining"],
+      ["blake3", "bk-foiq6vdxzvjrj7nkrp2jthuve4qq55i7hzk4sd7h23jyj5smpxea"],
+      ["fa:board", "4042afb7-d1fe-4a80-a311-9de404b0ee14"],
+      ["fa:day", "2026-07-29"],
+      ["fa:scope", "sprint"],
+      ["fa:sprint", "01e70cc9-0aaa-4ca9-88d4-ea897f42685e"],
+    ],
+    content:
+      '{"@context":"https://4a4.ai/ns/v0","@type":"KanbanTideSnapshot","committed_pts":11,"done_pts":6,"remaining_pts":5,"adds_today":0,"drops_today":0}',
+  };
+
+  it("accepts a real event built by evenflow", () => {
+    const result = validateKanbanTideEvent(GOLDEN);
+    expect(result.ok, result.ok ? "" : result.error).toBe(true);
+    if (result.ok) {
+      expect(result.value.boardId).toBe("4042afb7-d1fe-4a80-a311-9de404b0ee14");
+      expect(result.value.remainingPts).toBe(5);
+    }
+  });
+
+  it("agrees with evenflow on the blake3 digest of that exact content", () => {
+    // If either side changed how the content is serialized, this diverges.
+    expect(blake3ContentTag(GOLDEN.content)).toBe(
+      "bk-foiq6vdxzvjrj7nkrp2jthuve4qq55i7hzk4sd7h23jyj5smpxea",
+    );
+  });
+});
+
 describe("validateKanbanTideEvent — rejects", () => {
   const rejects = (e: TideEventLike, match: RegExp) => {
     const result = validateKanbanTideEvent(e);
