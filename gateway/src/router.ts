@@ -23,6 +23,10 @@ import { handleAudienceRequest } from "./audience";
 import { handleAudienceByInvitePubRequest } from "./audience-by-invite-pub";
 import { handleAudienceRawRequest } from "./audience-raw";
 import { handleKanbanTideRequest, KANBAN_TIDE_PATH } from "./kanban-tide-route";
+import {
+  handleKanbanPlaintextRequest,
+  KANBAN_PLAINTEXT_PATH,
+} from "./kanban-plaintext-route";
 import { handleAudienceStreamRequest } from "./audience-stream";
 import { handleBlossomRequest } from "./blossom";
 import { handleArtifactsRequest } from "./artifacts";
@@ -92,6 +96,13 @@ export default {
       // Kanban tide is NIP-98-authed and caller-signed, not JWT + KMS.
       if (url.pathname === KANBAN_TIDE_PATH) {
         return handleKanbanTideRequest(request, env);
+      }
+      // Same trap as the line above, and the reason kanban plaintext is ONE
+      // dispatcher route instead of five: this MUST stay above the generic
+      // `/v0/publish/` startsWith or publish.ts swallows it and answers 404
+      // "unknown publish path". Caller-signed + NIP-98, not JWT + KMS.
+      if (url.pathname === KANBAN_PLAINTEXT_PATH) {
+        return handleKanbanPlaintextRequest(request, env);
       }
       if (url.pathname.startsWith("/v0/publish/") || url.pathname === "/v0/attest") {
         return handlePublishRequest(request, env);
