@@ -86,6 +86,13 @@ export default {
       if (url.pathname === "/v0/profile" || url.pathname === "/v0/whoami") {
         return handleProfileApiRequest(request, env);
       }
+      // MUST match BEFORE the generic `/v0/publish/` startsWith below —
+      // otherwise `/v0/publish/kanban_tide` gets swallowed by the JWT-KMS
+      // handler in publish.ts, which returns 404 "unknown publish path".
+      // Kanban tide is NIP-98-authed and caller-signed, not JWT + KMS.
+      if (url.pathname === KANBAN_TIDE_PATH) {
+        return handleKanbanTideRequest(request, env);
+      }
       if (url.pathname.startsWith("/v0/publish/") || url.pathname === "/v0/attest") {
         return handlePublishRequest(request, env);
       }
@@ -103,11 +110,6 @@ export default {
       }
       if (url.pathname.startsWith("/v0/audience/raw/")) {
         return handleAudienceRawRequest(request, env);
-      }
-      // Sits above the /v0/publish/ block on purpose: this one path is
-      // NIP-98-authed and caller-signed, not JWT + KMS like its siblings.
-      if (url.pathname === KANBAN_TIDE_PATH) {
-        return handleKanbanTideRequest(request, env);
       }
       // Webhook-relay ingress: POST /v0/hook/:pubkey/:slug — public,
       // unauthenticated by design (third parties can't sign NIP-98);
