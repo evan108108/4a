@@ -219,6 +219,14 @@ const PAGES = [
     section: "Use cases",
   },
   {
+    src: "use-cases/evenflow-kanban.md",
+    slug: "use-cases/evenflow-kanban",
+    layout: "page",
+    title: "Kanban for humans and AI teammates",
+    summary: "A Linear-shaped kanban app publishing board state to 4A as it goes. Boards, issues, transitions, comments, and sprint tides all signed events on the substrate. Evenflow.work is the reference.",
+    section: "Use cases",
+  },
+  {
     src: "use-cases/public-artifacts.md",
     slug: "use-cases/public-artifacts",
     layout: "page",

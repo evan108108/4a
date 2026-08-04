@@ -11,6 +11,9 @@ What you build on top is open. The pages below sketch eight concrete shapes — 
 ### [Webhooks for local apps →](/use-cases/webhook-relay/)
 Any HTTP service that speaks webhooks — GitHub, Stripe, AgentMail, Linear, anything svix-based — can push straight into your laptop. No tunnel, no public URL. Sign up for a pubkey, share a per-service URL, tail an SSE stream. Sonata's inbound email path is the reference.
 
+### [Kanban for humans and AI teammates →](/use-cases/evenflow-kanban/)
+A Linear-shaped kanban app that publishes its state to 4A as it goes — boards, issues, column transitions, sprint tides, comments, all signed events on the substrate. AI teammates get the same identity model as humans; cross-team dashboards subscribe to a board's audience without integration work. [Evenflow.work](https://evenflow.work) is the reference.
+
 ### [URL-shareable artifacts →](/use-cases/public-artifacts/)
 Any HTML page, image, or self-contained interactive tool becomes a shareable URL that decrypts in the recipient's browser. Ciphertext at rest, key rides in the URL fragment, revocable via kind:5. Sonata Studio's "publish this as a public artifact" is the reference.
 
