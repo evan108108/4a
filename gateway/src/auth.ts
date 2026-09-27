@@ -75,6 +75,7 @@ const DEFAULT_REDIRECT_URI_PREFIXES = [
   "https://claude.ai/",
   "https://claude.com/",
   "https://evenflow.work/",
+  "https://hs.14th.place/",
 ];
 
 const DCR_PREFIX = "dcr1_";
