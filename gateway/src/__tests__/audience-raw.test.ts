@@ -40,6 +40,7 @@ vi.mock("../publish", () => ({
 }));
 
 import { handleAudienceRawRequest, type AudienceRawEnv } from "../audience-raw";
+import { fanOut } from "../publish";
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -399,6 +400,190 @@ describe("handleAudienceRawRequest — /grant", () => {
     );
     const res = await handleAudienceRawRequest(req, env);
     expect(res.status).toBe(404);
+  });
+});
+
+describe("handleAudienceRawRequest — /grant with updated_declaration (new members)", () => {
+  const SLUG = "room-succ";
+  const url = "https://api.4a4.ai/v0/audience/raw/grant";
+
+  // A cached room whose declaration is 100s old, so a successor signed "now"
+  // is strictly newer.
+  function seedRoom() {
+    const { env, stub } = makeStubEnv();
+    const founder = makeKeypair();
+    const service = makeKeypair(); // e.g. hs's service member
+    const audId = makeKeypair();
+    const epoch = makeKeypair();
+    const cachedCreatedAt = Math.floor(Date.now() / 1000) - 100;
+    const declaration = signEventWithRawKey(
+      buildAudienceDeclaration({
+        audIdPub: audId.pub,
+        slug: SLUG,
+        name: SLUG,
+        epoch: 1,
+        epochPub: epoch.pub,
+        members: [founder.pub, service.pub],
+        createdAt: cachedCreatedAt,
+      }),
+      audId.priv,
+    );
+    return { env, stub, founder, service, audId, epochPub: epoch.pub, declaration, cachedCreatedAt };
+  }
+
+  function successor(
+    room: ReturnType<typeof seedRoom>,
+    over: {
+      members?: string[];
+      epoch?: number;
+      epochPub?: string;
+      createdAt?: number;
+      status?: "closed";
+      signer?: Uint8Array;
+    },
+  ): SignedEvent {
+    return signEventWithRawKey(
+      buildAudienceDeclaration({
+        audIdPub: room.audId.pub,
+        slug: SLUG,
+        name: SLUG,
+        epoch: over.epoch ?? 1,
+        epochPub: over.epochPub ?? room.epochPub,
+        members: over.members ?? [room.founder.pub, room.service.pub],
+        createdAt: over.createdAt ?? Math.floor(Date.now() / 1000),
+        ...(over.status ? { status: over.status } : {}),
+      }),
+      over.signer ?? room.audId.priv,
+    );
+  }
+
+  function grantFor(room: ReturnType<typeof seedRoom>, granterPriv: Uint8Array, recipientPub: string): SignedEvent {
+    return signEventWithRawKey(
+      buildKeyGrant({
+        audIdPub: room.audId.pub,
+        slug: SLUG,
+        epoch: 1,
+        recipientPub,
+        ciphertext: fakeNip44V2Ciphertext(),
+      }),
+      granterPriv,
+    );
+  }
+
+  async function post(room: ReturnType<typeof seedRoom>, callerPriv: Uint8Array, body: Record<string, unknown>) {
+    const req = makeRequest(url, "POST", { audience_address: `30520:${room.audId.pub}:${SLUG}`, ...body }, callerPriv);
+    return handleAudienceRawRequest(req, room.env);
+  }
+
+  beforeEach(() => {
+    vi.mocked(fanOut).mockClear();
+  });
+
+  it("hs scenario: cached member S grants new pubkey N with updated_declaration (members + N, later created_at) → 200, declaration published before grant", async () => {
+    const room = seedRoom();
+    await room.stub.storeAudienceEvent(room.declaration);
+    const newbie = makeKeypair();
+    const updated = successor(room, { members: [room.founder.pub, room.service.pub, newbie.pub] });
+    const grant = grantFor(room, room.service.priv, newbie.pub);
+
+    const res = await post(room, room.service.priv, { grant, updated_declaration: updated });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; grant_event_id: string; declaration_event_id: string };
+    expect(body.ok).toBe(true);
+    expect(body.grant_event_id).toBe(grant.id);
+    expect(body.declaration_event_id).toBe(updated.id);
+
+    const published = vi.mocked(fanOut).mock.calls.map((c) => (c[0] as SignedEvent).id);
+    expect(published).toEqual([updated.id, grant.id]);
+    // cache now holds the successor declaration
+    expect((await room.stub.getObject(30520, room.audId.pub, SLUG))?.id).toBe(updated.id);
+  });
+
+  it("new member WITHOUT updated_declaration → 400 (unchanged behaviour)", async () => {
+    const room = seedRoom();
+    await room.stub.storeAudienceEvent(room.declaration);
+    const newbie = makeKeypair();
+    const res = await post(room, room.service.priv, { grant: grantFor(room, room.service.priv, newbie.pub) });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { message: string }).message).toMatch(/not a current member or pending invite/);
+    expect(vi.mocked(fanOut)).not.toHaveBeenCalled();
+  });
+
+  it("existing member grant without updated_declaration still → 200", async () => {
+    const room = seedRoom();
+    await room.stub.storeAudienceEvent(room.declaration);
+    const grant = grantFor(room, room.founder.priv, room.service.pub);
+    const res = await post(room, room.founder.priv, { grant });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { declaration_event_id: string };
+    expect(body.declaration_event_id).toBe(room.declaration.id);
+    expect(vi.mocked(fanOut).mock.calls.map((c) => (c[0] as SignedEvent).id)).toEqual([grant.id]);
+  });
+
+  it("re-sending the identical cached declaration is a no-op (only the grant is published)", async () => {
+    const room = seedRoom();
+    await room.stub.storeAudienceEvent(room.declaration);
+    const grant = grantFor(room, room.founder.priv, room.service.pub);
+    const res = await post(room, room.founder.priv, { grant, updated_declaration: room.declaration });
+    expect(res.status).toBe(200);
+    expect(vi.mocked(fanOut).mock.calls.map((c) => (c[0] as SignedEvent).id)).toEqual([grant.id]);
+  });
+
+  it("anti-self-promotion: a non-member granter can't add itself via updated_declaration → 400", async () => {
+    const room = seedRoom();
+    await room.stub.storeAudienceEvent(room.declaration);
+    const outsider = makeKeypair();
+    const newbie = makeKeypair();
+    // Even a genuine aud_id-signed successor that lists the outsider does not
+    // authorise the outsider as a granter.
+    const updated = successor(room, {
+      members: [room.founder.pub, room.service.pub, outsider.pub, newbie.pub],
+    });
+    const res = await post(room, outsider.priv, {
+      grant: grantFor(room, outsider.priv, newbie.pub),
+      updated_declaration: updated,
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { message: string }).message).toMatch(/granter is not a current member/);
+    expect(vi.mocked(fanOut)).not.toHaveBeenCalled();
+  });
+
+  const bad: Array<[string, (r: ReturnType<typeof seedRoom>, newbie: string) => SignedEvent, RegExp]> = [
+    ["drops a member", (r, n) => successor(r, { members: [r.service.pub, n] }), /drops 1 current member/],
+    ["changes the epoch", (r, n) => successor(r, { members: [r.founder.pub, r.service.pub, n], epoch: 2 }), /epoch \(2\) must equal the current epoch/],
+    ["changes the epoch pubkey", (r, n) => successor(r, { members: [r.founder.pub, r.service.pub, n], epochPub: makeKeypair().pub }), /keep the current fa:epoch-pubkey/],
+    ["is signed by the wrong key", (r, n) => successor(r, { members: [r.founder.pub, r.service.pub, n], signer: makeKeypair().priv }), /must be signed by aud_id/],
+    ["is not newer than the cached declaration", (r, n) => successor(r, { members: [r.founder.pub, r.service.pub, n], createdAt: r.cachedCreatedAt }), /must be newer than the current declaration/],
+    ["closes the audience", (r, n) => successor(r, { members: [r.founder.pub, r.service.pub, n], status: "closed" }), /must not close the audience/],
+  ];
+  for (const [what, make, msg] of bad) {
+    it(`updated_declaration that ${what} → 400, nothing published`, async () => {
+      const room = seedRoom();
+      await room.stub.storeAudienceEvent(room.declaration);
+      const newbie = makeKeypair();
+      const res = await post(room, room.service.priv, {
+        grant: grantFor(room, room.service.priv, newbie.pub),
+        updated_declaration: make(room, newbie.pub),
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { message: string }).message).toMatch(msg);
+      expect(vi.mocked(fanOut)).not.toHaveBeenCalled();
+    });
+  }
+
+  it("if no relay accepts the updated_declaration → 502 and the grant is NOT published", async () => {
+    const room = seedRoom();
+    await room.stub.storeAudienceEvent(room.declaration);
+    const newbie = makeKeypair();
+    vi.mocked(fanOut).mockImplementationOnce(async () => [
+      { relay: "wss://stub", status: "rejected" as const, accepted: false, message: "nope" },
+    ] as never);
+    const res = await post(room, room.service.priv, {
+      grant: grantFor(room, room.service.priv, newbie.pub),
+      updated_declaration: successor(room, { members: [room.founder.pub, room.service.pub, newbie.pub] }),
+    });
+    expect(res.status).toBe(502);
+    expect(vi.mocked(fanOut)).toHaveBeenCalledTimes(1);
   });
 });
 

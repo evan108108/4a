@@ -391,6 +391,84 @@ function parseGrantBody(raw: Record<string, unknown>): GrantBody {
   return out;
 }
 
+/**
+ * Successor rules for `/raw/grant`'s optional `updated_declaration`.
+ *
+ * A grant to a brand-new member needs a declaration that already lists that
+ * member, so the caller may supply the re-signed kind:30520 alongside the
+ * grant. It is only accepted as a MEMBERSHIP-ADDING successor of the cached
+ * declaration:
+ *
+ *   - signed by aud_id and a strictly valid kind:30520 (no expired invites);
+ *   - same slug, same epoch, same fa:epoch-pubkey — key changes go through
+ *     /raw/rotate;
+ *   - members are a superset of the cached members — removal goes through
+ *     /raw/rotate (never silently via a grant);
+ *   - not a close (fa:status=closed) — lifecycle changes go through
+ *     /raw/publish-declaration;
+ *   - created_at strictly newer than the cached declaration, so relays and
+ *     the cache actually replace it (NIP-01 replaceable semantics). Re-sending
+ *     the identical cached event is allowed as a no-op.
+ */
+function checkDeclarationSuccessor(
+  next: SignedEvent,
+  cached: { event: NostrEvent; decl: AudienceDeclaration },
+  audIdPub: string,
+  slug: string,
+): { ok: true; decl: AudienceDeclaration; isNoop: boolean } | { ok: false; error: string } {
+  if (next.pubkey.toLowerCase() !== audIdPub.toLowerCase()) {
+    return { ok: false, error: "updated_declaration must be signed by aud_id (audience_address pubkey)" };
+  }
+  const declCheck = validateAudienceEvent(next);
+  if (!declCheck.ok) {
+    return { ok: false, error: `updated_declaration invalid: ${declCheck.error}` };
+  }
+  const parsed = parseAudienceDeclaration(next);
+  if (!parsed.ok) {
+    return { ok: false, error: `updated_declaration invalid: ${parsed.error}` };
+  }
+  const d = parsed.value;
+  if (next.id === cached.event.id) {
+    return { ok: true, decl: d, isNoop: true };
+  }
+  if (d.slug !== slug) {
+    return { ok: false, error: "updated_declaration slug does not match audience_address" };
+  }
+  if (d.epoch !== cached.decl.epoch) {
+    return {
+      ok: false,
+      error: `updated_declaration epoch (${d.epoch}) must equal the current epoch (${cached.decl.epoch}); use /v0/audience/raw/rotate to change epochs`,
+    };
+  }
+  if (d.epochPub.toLowerCase() !== cached.decl.epochPub.toLowerCase()) {
+    return {
+      ok: false,
+      error: "updated_declaration must keep the current fa:epoch-pubkey; use /v0/audience/raw/rotate to change keys",
+    };
+  }
+  const nextMembers = new Set(d.members.map((m) => m.toLowerCase()));
+  const dropped = cached.decl.members.filter((m) => !nextMembers.has(m.toLowerCase()));
+  if (dropped.length > 0) {
+    return {
+      ok: false,
+      error: `updated_declaration drops ${dropped.length} current member(s); member removal goes through /v0/audience/raw/rotate`,
+    };
+  }
+  if (d.status === "closed") {
+    return {
+      ok: false,
+      error: "updated_declaration must not close the audience; use /v0/audience/raw/publish-declaration",
+    };
+  }
+  if (next.created_at <= cached.event.created_at) {
+    return {
+      ok: false,
+      error: `updated_declaration created_at (${next.created_at}) must be newer than the current declaration (${cached.event.created_at})`,
+    };
+  }
+  return { ok: true, decl: d, isNoop: false };
+}
+
 async function runGrant(
   callerPubkey: string,
   body: GrantBody,
@@ -416,38 +494,52 @@ async function runGrant(
     );
   }
 
-  const lookup = buildLookup(audIdPub, slug, cached.decl);
+  // 1. If an updated declaration is supplied, validate it FIRST as a
+  //    successor of the cached one, so the grant can be checked against the
+  //    roster it will be published alongside (a grant to a brand-new member
+  //    is only valid against the declaration that adds them).
+  let effectiveDecl = cached.decl;
+  let publishDecl: SignedEvent | undefined;
+  if (body.updated_declaration) {
+    const succ = checkDeclarationSuccessor(body.updated_declaration, cached, audIdPub, slug);
+    if (!succ.ok) return jsonError("bad_request", succ.error, 400);
+    effectiveDecl = succ.decl;
+    if (!succ.isNoop) publishDecl = body.updated_declaration;
+  }
+
+  // 2. The granter must already be authorised by the CURRENT declaration —
+  //    an updated declaration can add recipients, not promote the granter.
+  const granter = body.grant.pubkey.toLowerCase();
+  const granterAuthorised =
+    cached.decl.audIdPub.toLowerCase() === granter ||
+    cached.decl.members.some((m) => m.toLowerCase() === granter);
+  if (!granterAuthorised) {
+    return jsonError(
+      "bad_request",
+      "grant invalid: granter is not a current member nor the audience identity",
+      400,
+    );
+  }
+
+  const lookup = buildLookup(audIdPub, slug, effectiveDecl);
   const grantCheck = validateKeyGrantEvent(body.grant, lookup);
   if (!grantCheck.ok) {
     return jsonError("bad_request", `grant invalid: ${grantCheck.error}`, 400);
   }
 
-  // Validate optional updated_declaration. Must be signed by aud_id, not the
-  // caller — the audience identity is the only key that can re-issue 30520.
-  if (body.updated_declaration) {
-    if (body.updated_declaration.pubkey.toLowerCase() !== audIdPub.toLowerCase()) {
-      return jsonError(
-        "bad_request",
-        "updated_declaration must be signed by aud_id (audience_address pubkey)",
-        400,
-      );
-    }
-    const declCheck = validateAudienceEvent(body.updated_declaration);
-    if (!declCheck.ok) {
-      return jsonError(
-        "bad_request",
-        `updated_declaration invalid: ${declCheck.error}`,
-        400,
-      );
-    }
-  }
-
-  // Fan-out: grant first; declaration if supplied.
-  const grantOut = await publishAndStore(body.grant, env);
+  // 3. Fan-out: declaration first (so readers never see a grant to a
+  //    non-member), then the grant. If no relay takes the declaration, the
+  //    grant is not published.
   let declOut: PublishOutcome | undefined;
-  if (body.updated_declaration) {
-    declOut = await publishAndStore(body.updated_declaration, env);
+  if (publishDecl) {
+    declOut = await publishAndStore(publishDecl, env);
+    if (!declOut.accepted) {
+      return jsonError("relay_failure", "no relays accepted the updated_declaration", 502, {
+        relay_acks: declOut.acks,
+      });
+    }
   }
+  const grantOut = await publishAndStore(body.grant, env);
 
   return jsonResponse({
     ok: true,

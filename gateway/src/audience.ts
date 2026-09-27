@@ -539,12 +539,20 @@ async function runGrant(
     declSigned = signEventWithRawKey(declTpl, body.aud_id_priv);
   }
 
-  // Publish.
-  const grantOut = await publishAndStore(grantSigned, env);
+  // Publish the declaration first so readers never see a grant to a
+  // non-member, then the grant. If no relay accepts the declaration, the
+  // grant is not published.
   let declOut: PublishOutcome | undefined;
   if (declSigned) {
     declOut = await publishAndStore(declSigned, env);
+    if (!declOut.accepted) {
+      granterPriv.fill(0);
+      return jsonError("relay_failure", "no relays accepted the updated declaration", 502, {
+        relay_acks: declOut.acks,
+      });
+    }
   }
+  const grantOut = await publishAndStore(grantSigned, env);
   granterPriv.fill(0);
 
   return jsonResponse({
