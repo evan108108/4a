@@ -23,7 +23,7 @@ Two install paths. Pick one.
 **Self-hosted MCP (Claude Code, Cursor, etc.):** Add `mcp.4a4.ai` as an MCP server. The handshake accepts a bearer JWT on the `/sse` upgrade; if your client cannot set headers, you can attach the JWT after the fact with `auth_4a({ jwt })`. Get the JWT by completing the OAuth flow in a browser — pick a provider:
 
 - `https://api.4a4.ai/auth/github/start` — sign in with GitHub
-- `https://api.4a4.ai/auth/google/start` — sign in with Google
+- `https://api.4a4.ai/auth/google/start` — sign in with Google (optional `?login_hint=<email>` pre-selects the Google account, handy for silent re-auth on devices with several accounts)
 
 The callback prints the token. **Note:** your 4A pubkey is derived from `provider:oauth_id`, so GitHub and Google produce *different* pubkeys for the same human. Pick one provider and stay with it if you want a single signing identity across the connector and self-hosted clients.
 

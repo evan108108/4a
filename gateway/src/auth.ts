@@ -14,6 +14,9 @@
 //                                     Without those params it falls back to
 //                                     the legacy "direct" browser flow that
 //                                     returns a JWT as JSON.
+//                                     Optional ?login_hint=<email> (Google
+//                                     only) is validated and forwarded to
+//                                     Google's authorize URL.
 //   GET  /auth/{provider}/callback  — provider redirects here. Either
 //                                     redirects back to the downstream
 //                                     client with code+state (AS flow) or
@@ -684,7 +687,31 @@ async function startProvider(
     response_type: "code",
   });
   if (provider.name === "github") params.set("allow_signup", "true");
+  // Optional login_hint (Google only): pre-selects the account so a silent
+  // daily re-auth on a phone with several Google accounts skips the chooser.
+  // Only a well-formed email is forwarded. Invalid values are dropped, not
+  // rejected, so a stale hint never blocks sign-in. `prompt` is never
+  // forwarded. GitHub has no email-shaped equivalent, so the hint is ignored.
+  if (provider.name === "google") {
+    const hint = parseLoginHint(url.searchParams.get("login_hint"));
+    if (hint) params.set("login_hint", hint);
+  }
   return Response.redirect(`${provider.authorizeUrl}?${params.toString()}`, 302);
+}
+
+// RFC 5321 caps a forward-path at 256 octets including the angle brackets,
+// so an address is at most 254 characters.
+const LOGIN_HINT_MAX_LENGTH = 254;
+// Pragmatic single-address shape: local@domain.tld, with no whitespace,
+// separators or quoting.
+const LOGIN_HINT_EMAIL = /^[^\s@<>"',;:\\()[\]]+@[^\s@<>"',;:\\()[\]]+\.[^\s@<>"',;:\\()[\].]+$/;
+
+/** Returns the trimmed email if `raw` is an acceptable login_hint, else undefined. */
+export function parseLoginHint(raw: string | null): string | undefined {
+  if (raw === null) return undefined;
+  const value = raw.trim();
+  if (value.length === 0 || value.length > LOGIN_HINT_MAX_LENGTH) return undefined;
+  return LOGIN_HINT_EMAIL.test(value) ? value : undefined;
 }
 
 // ── /auth/{provider}/callback ──────────────────────────────────────────────
