@@ -79,7 +79,8 @@ import {
 } from "./audience-closed-guard";
 import type { NostrEvent, RelayPool, StoredWrap } from "./relay-pool";
 import { WRAP_CURSOR } from "./lib/wrap-cursor";
-import { enqueueRelayRetries, fanOut, rateLimitCheck, type RelayResult } from "./publish";
+import { mapWithConcurrency } from "./lib/concurrency";
+import { enqueueRelayRetries, fanOut, fanOutBatch, rateLimitCheck, type RelayResult } from "./publish";
 
 export type AudienceEnv = AuthEnv & KmsEnv & {
   RELAY_POOL: DurableObjectNamespace<RelayPool>;
@@ -201,36 +202,68 @@ export interface MemberWrapResult {
   acks: RelayResult[];
 }
 
-// Deliver one gift-wrap per member, all members in parallel. Each wrap is
-// cached in the relay-pool DO first (so the inbox/stream never waits on
-// relays), then fanned out, and any transiently-failed relays go to the retry
-// queue. Results keep the input (member) order. Exported for tests.
+// How many relay-pool DO calls (cache writes, retry hand-offs) one request
+// makes at once. Relay publishing is batched separately (fanOutBatch: one
+// socket per relay), so this only bounds DO traffic.
+export const DO_CALL_CONCURRENCY = 8;
+
+// Deliver one gift-wrap per member. Every wrap is cached in the relay-pool DO
+// first (so the inbox/stream never waits on relays), then all of them go to
+// the relays in one batch (one socket per relay), and each wrap's
+// transiently-failed relays go to the retry queue. Results keep the input
+// (member) order. Shared with /v0/audience/raw/publish-wraps; exported for
+// tests.
 export async function deliverMemberWraps(
-  memberWraps: MemberWrap[],
+  memberWraps: readonly MemberWrap[],
   stub: Pick<DurableObjectStub<RelayPool>, "storeGiftWrap">,
   env: Pick<AudienceEnv, "RELAY_POOL">,
 ): Promise<MemberWrapResult[]> {
-  return Promise.all(
-    memberWraps.map(async ({ recipient, wrapSigned }) => {
-      await stub.storeGiftWrap(wrapSigned, recipient).catch((err: unknown) => {
-        console.error("[audience publish] storeGiftWrap threw", {
-          id: wrapSigned.id,
-          recipient,
-          error: err instanceof Error ? err.message : String(err),
-        });
+  await mapWithConcurrency(memberWraps, DO_CALL_CONCURRENCY, ({ recipient, wrapSigned }) =>
+    stub.storeGiftWrap(wrapSigned, recipient).catch((err: unknown) => {
+      console.error("[audience publish] storeGiftWrap threw", {
+        id: wrapSigned.id,
+        recipient,
+        error: err instanceof Error ? err.message : String(err),
       });
-      const acks = await fanOut(wrapSigned);
-      await enqueueRelayRetries(env, wrapSigned, acks);
-      return { recipient, event_id: wrapSigned.id, acks };
     }),
   );
+  const acks = await fanOutBatch(memberWraps.map((m) => m.wrapSigned));
+  await mapWithConcurrency(memberWraps, DO_CALL_CONCURRENCY, ({ wrapSigned }, i) =>
+    enqueueRelayRetries(env, wrapSigned, acks[i]!),
+  );
+  return memberWraps.map(({ recipient, wrapSigned }, i) => ({
+    recipient,
+    event_id: wrapSigned.id,
+    acks: acks[i]!,
+  }));
 }
 
 async function publishAndStore(
   signed: SignedEvent,
   env: AudienceEnv,
 ): Promise<PublishOutcome> {
-  const acks = await fanOut(signed);
+  return settlePublish(signed, await fanOut(signed), env);
+}
+
+// publishAndStore for many events: one relay batch (one socket per relay),
+// then each event settles on its own. Outcomes keep the input order.
+async function publishAllAndStore(
+  events: readonly SignedEvent[],
+  env: AudienceEnv,
+): Promise<PublishOutcome[]> {
+  const acks = await fanOutBatch(events);
+  return mapWithConcurrency(events, DO_CALL_CONCURRENCY, (signed, i) =>
+    settlePublish(signed, acks[i]!, env),
+  );
+}
+
+// Everything after the relay fan-out: queue retries, log a publish no relay
+// took, and cache what was accepted.
+async function settlePublish(
+  signed: SignedEvent,
+  acks: RelayResult[],
+  env: AudienceEnv,
+): Promise<PublishOutcome> {
   // Relays that timed out or were rate-limited go to the DO retry queue, as
   // on the /v0/publish and /v0/score paths. Before 2026-09-27 the audience
   // paths skipped this, so a relay that missed a declaration/grant/claim
@@ -1032,8 +1065,9 @@ async function runRotate(
   const grantSigningPriv = granterIsMember ? granterPriv : body.aud_id_priv;
 
   // Sign every grant up front (synchronous, needs the private keys), then
-  // publish them in parallel. Publishing one member at a time made each
-  // member's relay fan-out add to the response time.
+  // publish them as one relay batch. Publishing one member at a time made each
+  // member's relay fan-out add to the response time; a socket per (grant,
+  // relay) overran the Workers connection limit.
   const signedGrants = newMembers.map((recipient) => {
     const ciphertext = nip44Encrypt(epochKp.priv, grantSigningPriv, recipient);
     const grantTpl = buildKeyGrant({
@@ -1045,13 +1079,16 @@ async function runRotate(
     });
     return { recipient, grantSigned: signEventWithRawKey(grantTpl, grantSigningPriv) };
   });
+  const grantPublished = await publishAllAndStore(
+    signedGrants.map((g) => g.grantSigned),
+    env,
+  );
   const grantOuts: { recipient: string; event_id: string; acks: RelayResult[] }[] =
-    await Promise.all(
-      signedGrants.map(async ({ recipient, grantSigned }) => {
-        const out = await publishAndStore(grantSigned, env);
-        return { recipient, event_id: grantSigned.id, acks: out.acks };
-      }),
-    );
+    signedGrants.map(({ recipient, grantSigned }, i) => ({
+      recipient,
+      event_id: grantSigned.id,
+      acks: grantPublished[i]!.acks,
+    }));
 
   granterPriv.fill(0);
 

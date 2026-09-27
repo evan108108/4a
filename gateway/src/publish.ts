@@ -49,6 +49,18 @@ const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 // DO retry queue. See lib/relay-connect.ts for why the connect bound exists.
 export const RELAY_CONNECT_TIMEOUT_MS = 3000;
 export const RELAY_OK_TIMEOUT_MS = 3000;
+// A batch gets the single-event OK window plus RELAY_BATCH_OK_PER_EVENT_MS per
+// extra event, capped at RELAY_BATCH_OK_MAX_MS: relays answer a burst of
+// EVENTs in order, but not instantly.
+export const RELAY_BATCH_OK_PER_EVENT_MS = 100;
+export const RELAY_BATCH_OK_MAX_MS = 10_000;
+
+export function batchOkWindowMs(events: number): number {
+  return Math.min(
+    RELAY_BATCH_OK_MAX_MS,
+    RELAY_OK_TIMEOUT_MS + RELAY_BATCH_OK_PER_EVENT_MS * Math.max(0, events - 1),
+  );
+}
 const HEX64 = /^[0-9a-f]{64}$/i;
 
 const KIND_OBSERVATION = 30500;
@@ -150,89 +162,90 @@ export interface RelayResult {
   message?: string;
 }
 
-async function publishToRelay(relay: string, event: SignedEvent): Promise<RelayResult> {
+// Publish a batch of events to one relay over ONE socket: connect (bounded by
+// RELAY_CONNECT_TIMEOUT_MS), send every EVENT frame, then collect the OKs by
+// event id until all have answered or the batch window (batchOkWindowMs)
+// closes. Returns one result per input event, in input order. Events the
+// relay never answered, and every event when the connect or socket fails,
+// come back "rate-limited-retrying" so the caller can queue them for retry.
+async function publishBatchToRelay(
+  relay: string,
+  events: readonly SignedEvent[],
+): Promise<RelayResult[]> {
+  const retrying = (message: string): RelayResult => ({
+    relay,
+    status: "rate-limited-retrying",
+    accepted: false,
+    message,
+  });
   const httpUrl = relay.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
   let ws: WebSocket | null = null;
   try {
     ws = await connectRelaySocket(httpUrl, RELAY_CONNECT_TIMEOUT_MS);
-    if (!ws) {
-      return {
-        relay,
-        status: "rate-limited-retrying",
-        accepted: false,
-        message: "relay did not upgrade to WebSocket",
-      };
-    }
+    if (!ws) return events.map(() => retrying("relay did not upgrade to WebSocket"));
     ws.accept();
 
-    const result = await new Promise<RelayResult>((resolve) => {
-      const timer = setTimeout(() => {
-        resolve({
-          relay,
-          status: "rate-limited-retrying",
-          accepted: false,
-          message: "timeout waiting for OK",
-        });
-      }, RELAY_OK_TIMEOUT_MS);
+    const answered = new Map<string, RelayResult>();
+    const waiting = new Set(events.map((e) => e.id));
+    // Resolves with the reason the still-unanswered events get.
+    const unansweredReason = await new Promise<string>((resolve) => {
+      const timer = setTimeout(() => resolve("timeout waiting for OK"), batchOkWindowMs(events.length));
+      const done = (reason: string) => {
+        clearTimeout(timer);
+        resolve(reason);
+      };
 
       ws!.addEventListener("message", (ev) => {
         try {
           const msg = JSON.parse(typeof ev.data === "string" ? ev.data : "");
-          if (Array.isArray(msg) && msg[0] === "OK" && msg[1] === event.id) {
-            clearTimeout(timer);
-            const ok = msg[2] === true;
-            const message = typeof msg[3] === "string" ? msg[3] : "";
-            const status: RelayStatus = ok ? "accepted" : classifyRejection(message);
-            resolve({
-              relay,
-              status,
-              accepted: status === "accepted",
-              ...(message ? { message } : {}),
-            });
-          }
+          if (!Array.isArray(msg) || msg[0] !== "OK" || typeof msg[1] !== "string") return;
+          const id = msg[1];
+          if (!waiting.delete(id)) return;
+          const ok = msg[2] === true;
+          const message = typeof msg[3] === "string" ? msg[3] : "";
+          const status: RelayStatus = ok ? "accepted" : classifyRejection(message);
+          answered.set(id, {
+            relay,
+            status,
+            accepted: status === "accepted",
+            ...(message ? { message } : {}),
+          });
+          if (waiting.size === 0) done("");
         } catch {
           // ignore non-JSON / unrelated frames
         }
       });
-      ws!.addEventListener("close", () => {
-        clearTimeout(timer);
-        resolve({
-          relay,
-          status: "rate-limited-retrying",
-          accepted: false,
-          message: "socket closed before OK",
-        });
-      });
-      ws!.addEventListener("error", () => {
-        clearTimeout(timer);
-        resolve({
-          relay,
-          status: "rate-limited-retrying",
-          accepted: false,
-          message: "socket error",
-        });
-      });
+      ws!.addEventListener("close", () => done("socket closed before OK"));
+      ws!.addEventListener("error", () => done("socket error"));
 
-      ws!.send(JSON.stringify(["EVENT", event]));
+      for (const event of events) ws!.send(JSON.stringify(["EVENT", event]));
     });
-    return result;
+    return events.map((e) => answered.get(e.id) ?? retrying(unansweredReason));
   } catch (err) {
-    return {
-      relay,
-      status: "rate-limited-retrying",
-      accepted: false,
-      message: err instanceof Error ? err.message : String(err),
-    };
+    return events.map(() => retrying(err instanceof Error ? err.message : String(err)));
   } finally {
     try { ws?.close(); } catch { /* noop */ }
   }
 }
 
-// Publish to every relay in parallel. Each relay is bounded (connect + OK),
-// so the whole fan-out returns within RELAY_CONNECT_TIMEOUT_MS +
-// RELAY_OK_TIMEOUT_MS no matter how any single relay behaves.
+// Publish N events to every relay: one socket per relay (RELAYS.length
+// sockets in all, whatever N is), all relays in parallel. A Workers
+// invocation gets 6 simultaneous open connections and queues the rest with
+// their connect timers already running, so opening a socket per (event,
+// relay) turned big batches into spurious connect timeouts. Returns, for each
+// input event in input order, its per-relay results in RELAYS order (the same
+// shape fanOut returns). Each relay is bounded by RELAY_CONNECT_TIMEOUT_MS +
+// batchOkWindowMs(N), so the whole call is too.
+export async function fanOutBatch(events: readonly SignedEvent[]): Promise<RelayResult[][]> {
+  if (events.length === 0) return [];
+  const perRelay = await Promise.all(RELAYS.map((relay) => publishBatchToRelay(relay, events)));
+  return events.map((_, i) => perRelay.map((results) => results[i]!));
+}
+
+// Publish one event to every relay in parallel: a batch of one, so it is
+// bounded by RELAY_CONNECT_TIMEOUT_MS + RELAY_OK_TIMEOUT_MS.
 export async function fanOut(event: SignedEvent): Promise<RelayResult[]> {
-  return Promise.all(RELAYS.map((relay) => publishToRelay(relay, event)));
+  return (await fanOutBatch([event]))[0]!;
 }
 
 // Hand every transiently-failed relay ("rate-limited-retrying", which includes

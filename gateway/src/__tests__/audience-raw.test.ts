@@ -26,8 +26,8 @@ import type { NostrEvent } from "../relay-pool";
 // Stub publish.ts entirely. Importing the real module would transitively load
 // relay-pool.ts, which imports `cloudflare:workers` and is unavailable under
 // the Node test runner.
-vi.mock("../publish", () => ({
-  fanOut: vi.fn(async (event: SignedEvent) => [
+const { defaultFanOut, defaultFanOutBatch } = vi.hoisted(() => {
+  const defaultFanOut = async (event: { id: string }) => [
     { relay: "wss://stub", status: "accepted" as const, accepted: true, message: "OK" },
     {
       relay: "wss://stub2",
@@ -35,12 +35,19 @@ vi.mock("../publish", () => ({
       accepted: true,
       message: `OK ${event.id.slice(0, 8)}`,
     },
-  ]),
+  ];
+  const defaultFanOutBatch = (events: readonly { id: string }[]) => Promise.all(events.map(defaultFanOut));
+  return { defaultFanOut, defaultFanOutBatch };
+});
+vi.mock("../publish", () => ({
+  fanOut: vi.fn(defaultFanOut),
+  fanOutBatch: vi.fn(defaultFanOutBatch),
+  enqueueRelayRetries: vi.fn(async () => {}),
   rateLimitCheck: vi.fn(() => ({ ok: true as const })),
 }));
 
 import { handleAudienceRawRequest, type AudienceRawEnv } from "../audience-raw";
-import { fanOut } from "../publish";
+import { enqueueRelayRetries, fanOut, fanOutBatch, type RelayResult } from "../publish";
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -1079,6 +1086,217 @@ describe("handleAudienceRawRequest — /publish-declaration", () => {
 
 // Sanity: helpers above use the shared fakeNip44V2Ciphertext; this guards
 // against accidental decoding by the structural check.
+// ─── batched relay fan-out (2026-09-27) ────────────────────────────────────
+//
+// publish-wraps and rotate's grants[] published one event at a time; a
+// 40-wrap publish-wraps call took ~3.5 min. They now hand every event to
+// fanOutBatch in one call (one socket per relay; the socket-level behaviour
+// is tested in relay-fanout-timeout.test.ts), keep request order, cache wraps
+// before the relay fan-out, and queue transient relay failures for retry.
+
+describe("handleAudienceRawRequest — batched relay fan-out", () => {
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+  const acceptedAcks = (id: string): RelayResult[] => [
+    { relay: "wss://stub", status: "accepted", accepted: true, message: "OK" },
+    { relay: "wss://stub2", status: "accepted", accepted: true, message: `OK ${id.slice(0, 8)}` },
+  ];
+
+  beforeEach(() => {
+    vi.mocked(fanOut).mockClear();
+    vi.mocked(fanOutBatch).mockClear();
+    vi.mocked(enqueueRelayRetries).mockClear();
+  });
+  afterEach(() => {
+    vi.mocked(fanOut).mockImplementation(defaultFanOut);
+    vi.mocked(fanOutBatch).mockImplementation(defaultFanOutBatch);
+  });
+
+  // A room whose declaration lists `members` (founder first), cached in the stub.
+  function seedRoom(stub: StubDO, slug: string, members: string[], epoch = 1) {
+    const audId = makeKeypair();
+    const declaration = signEventWithRawKey(
+      buildAudienceDeclaration({ audIdPub: audId.pub, slug, name: slug, epoch, epochPub: makeKeypair().pub, members }),
+      audId.priv,
+    );
+    stub.events.set(`30520:${audId.pub}:${slug}`, declaration);
+    return { audId, address: `30520:${audId.pub}:${slug}` };
+  }
+
+  function wrapFor(recipient: string): SignedEvent {
+    return signEventWithRawKey(
+      { kind: 1059, created_at: Math.floor(Date.now() / 1000), tags: [["p", recipient]], content: fakeNip44V2Ciphertext() },
+      makeKeypair().priv,
+    );
+  }
+
+  async function publishWraps(env: AudienceRawEnv, callerPriv: Uint8Array, address: string, wraps: SignedEvent[]) {
+    const url = "https://api.4a4.ai/v0/audience/raw/publish-wraps";
+    const res = await handleAudienceRawRequest(
+      makeRequest(url, "POST", { audience_address: address, gift_wraps: wraps }, callerPriv),
+      env,
+    );
+    return {
+      status: res.status,
+      body: (await res.json()) as {
+        ok: true;
+        audience_address: string;
+        epoch: number;
+        gift_wraps: { recipient: string; event_id: string; relay_acks: RelayResult[] }[];
+      },
+    };
+  }
+
+  it("publish-wraps: all wraps go to the relays in ONE batch, in request order", async () => {
+    const { env, stub } = makeStubEnv();
+    const founder = makeKeypair();
+    const others = [makeKeypair(), makeKeypair()];
+    const room = seedRoom(stub, "batch", [founder.pub, ...others.map((o) => o.pub)]);
+    const recipients = Array.from({ length: 40 }, (_, i) => [founder.pub, others[0]!.pub, others[1]!.pub][i % 3]!);
+    const wraps = recipients.map(wrapFor);
+
+    const { status, body } = await publishWraps(env, founder.priv, room.address, wraps);
+    expect(status).toBe(200);
+    expect(vi.mocked(fanOut)).not.toHaveBeenCalled();
+    expect(vi.mocked(fanOutBatch)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fanOutBatch).mock.calls[0]![0].map((e) => e.id)).toEqual(wraps.map((w) => w.id));
+    // Response shape and order unchanged; each wrap gets its own acks.
+    expect(body).toMatchObject({ ok: true, audience_address: room.address, epoch: 1 });
+    expect(body.gift_wraps.map((g) => g.event_id)).toEqual(wraps.map((w) => w.id));
+    expect(body.gift_wraps.map((g) => g.recipient)).toEqual(recipients);
+    expect(body.gift_wraps.map((g) => g.relay_acks)).toEqual(wraps.map((w) => acceptedAcks(w.id)));
+  });
+
+  it("publish-wraps: caches every wrap before the relay batch, even if no relay accepts, and queues retries per wrap", async () => {
+    const { env, stub } = makeStubEnv();
+    const founder = makeKeypair();
+    const room = seedRoom(stub, "cache", [founder.pub]);
+    const log: string[] = [];
+    stub.storeGiftWrap = async (event, recipient) => {
+      await sleep(5); // a slow cache must still finish before the relays
+      log.push(`store:${event.id}:${recipient}`);
+      return { ok: true };
+    };
+    const retrying = (id: string): RelayResult[] => [
+      { relay: "wss://stub", status: "rate-limited-retrying", accepted: false, message: "timeout waiting for OK" },
+      { relay: "wss://stub2", status: "failed-permanent", accepted: false, message: `blocked ${id.slice(0, 4)}` },
+    ];
+    vi.mocked(fanOutBatch).mockImplementation(async (events) => {
+      log.push("relays");
+      return events.map((e) => retrying(e.id));
+    });
+    const wraps = [wrapFor(founder.pub), wrapFor(founder.pub), wrapFor(founder.pub)];
+
+    const { status, body } = await publishWraps(env, founder.priv, room.address, wraps);
+    expect(status).toBe(200);
+    expect(log.slice(0, 3).sort()).toEqual(wraps.map((w) => `store:${w.id}:${founder.pub}`).sort());
+    expect(log[3]).toBe("relays");
+    expect(body.gift_wraps.map((g) => g.relay_acks)).toEqual(wraps.map((w) => retrying(w.id)));
+    // One retry hand-off per wrap, with that wrap's acks, in order.
+    expect(vi.mocked(enqueueRelayRetries).mock.calls.map(([, e, acks]) => [e.id, acks])).toEqual(
+      wraps.map((w) => [w.id, retrying(w.id)]),
+    );
+  });
+
+  it("rotate: declaration first, then all grants in ONE batch; order, accepted and retries per grant", async () => {
+    const { env, stub } = makeStubEnv();
+    const caller = makeKeypair();
+    const audId = makeKeypair();
+    const members = Array.from({ length: 12 }, () => makeKeypair().pub);
+    const declaration = signEventWithRawKey(
+      buildAudienceDeclaration({ audIdPub: audId.pub, slug: "rot-par", name: "rot-par", epoch: 2, epochPub: makeKeypair().pub, members }),
+      audId.priv,
+    );
+    const grants = members.map((m) =>
+      signEventWithRawKey(
+        buildKeyGrant({ audIdPub: audId.pub, slug: "rot-par", epoch: 2, recipientPub: m, ciphertext: fakeNip44V2Ciphertext() }),
+        audId.priv,
+      ),
+    );
+    const order: string[] = [];
+    vi.mocked(fanOut).mockImplementation(async (e) => {
+      order.push(`single:${e.id}`);
+      return acceptedAcks(e.id);
+    });
+    // Grant 3 is rejected everywhere; odd grants lose one relay to a timeout.
+    vi.mocked(fanOutBatch).mockImplementation(async (events) => {
+      order.push("batch");
+      return events.map((e, i): RelayResult[] =>
+        i === 3
+          ? [{ relay: "wss://stub", status: "failed-permanent", accepted: false, message: "blocked" }]
+          : i % 2 === 1
+            ? [{ relay: "wss://stub", status: "rate-limited-retrying", accepted: false }, acceptedAcks(e.id)[1]!]
+            : acceptedAcks(e.id),
+      );
+    });
+
+    const url = "https://api.4a4.ai/v0/audience/raw/rotate";
+    const res = await handleAudienceRawRequest(
+      makeRequest(url, "POST", { audience_address: `30520:${audId.pub}:rot-par`, declaration, grants }, caller.priv),
+      env,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      epoch: number;
+      grants: { recipient: string; event_id: string; accepted: boolean; relay_acks: RelayResult[] }[];
+    };
+    expect(order).toEqual([`single:${declaration.id}`, "batch"]);
+    expect(vi.mocked(fanOutBatch).mock.calls[0]![0].map((e) => e.id)).toEqual(grants.map((g) => g.id));
+    expect(body.epoch).toBe(2);
+    expect(body.grants.map((g) => g.event_id)).toEqual(grants.map((g) => g.id));
+    expect(body.grants.map((g) => g.recipient)).toEqual(members);
+    expect(body.grants.map((g) => g.accepted)).toEqual(grants.map((_, i) => i !== 3));
+    // Every publish (declaration + 12 grants) goes through the retry hand-off.
+    expect(vi.mocked(enqueueRelayRetries)).toHaveBeenCalledTimes(1 + grants.length);
+    // Accepted grants are cached; the rejected one isn't.
+    const cached = (g: SignedEvent) => stub.events.get(`${g.kind}:${g.pubkey}:${g.tags.find((t) => t[0] === "d")![1]}`)?.id === g.id;
+    expect(grants.map(cached)).toEqual(grants.map((_, i) => i !== 3));
+  });
+
+  it("process-claims: keeps the declaration's pending order", async () => {
+    const { env, stub } = makeStubEnv();
+    const founder = makeKeypair();
+    const audId = makeKeypair();
+    const invites = [makeKeypair(), makeKeypair(), makeKeypair()];
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    const declaration = signEventWithRawKey(
+      buildAudienceDeclaration({
+        audIdPub: audId.pub,
+        slug: "pc",
+        name: "pc",
+        epoch: 1,
+        epochPub: makeKeypair().pub,
+        members: [founder.pub],
+        pending: invites.map((i) => ({ invitePub: i.pub, expirationUnix: exp })),
+      }),
+      audId.priv,
+    );
+    await stub.storeAudienceEvent(declaration);
+    // Claims for invites 0 and 2 (not 1); the first read is the slowest.
+    const claims = [0, 2].map((n) => {
+      const claimer = makeKeypair();
+      const claim = signEventWithRawKey(
+        buildAudienceClaim({ audIdPub: audId.pub, slug: "pc", epoch: 1, invitePub: invites[n]!.pub, inviterPub: founder.pub, claimPub: claimer.pub, expiration: exp }),
+        invites[n]!.priv,
+      );
+      stub.events.set(`30522:${invites[n]!.pub}:pc:1:${invites[n]!.pub}`, claim);
+      return { invite_pub: invites[n]!.pub, claim_pubkey: claimer.pub, claim_event_id: claim.id };
+    });
+    const getObject = stub.getObject.bind(stub);
+    stub.getObject = async (kind, pubkey, d) => {
+      if (kind === 30522 && pubkey === invites[0]!.pub) await sleep(30);
+      return getObject(kind, pubkey, d);
+    };
+
+    const url = "https://api.4a4.ai/v0/audience/raw/process-claims";
+    const res = await handleAudienceRawRequest(
+      makeRequest(url, "POST", { audience_address: `30520:${audId.pub}:pc` }, founder.priv),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { claimed: unknown[] }).claimed).toEqual(claims);
+  });
+});
+
 describe("test helpers", () => {
   it("fakeNip44V2Ciphertext starts with the v2 version byte", () => {
     const b = fakeNip44V2Ciphertext();

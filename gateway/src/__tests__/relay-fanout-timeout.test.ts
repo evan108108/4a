@@ -22,8 +22,11 @@ vi.mock("cloudflare:workers", () => ({
 }));
 
 import {
+  batchOkWindowMs,
   enqueueRelayRetries,
   fanOut,
+  fanOutBatch,
+  RELAY_BATCH_OK_MAX_MS,
   RELAY_CONNECT_TIMEOUT_MS,
   RELAY_OK_TIMEOUT_MS,
   type RelayResult,
@@ -38,12 +41,19 @@ const HUNG_RELAY = "wss://nos.lol";
 type Listener = (ev: { data?: unknown }) => void;
 
 // Minimal stand-in for a Workers WebSocket. "ok" answers every EVENT with an
-// OK frame on the next tick; "silent" accepts the EVENT and never answers.
+// OK frame on the next tick; "silent" accepts the EVENT and never answers;
+// "reverse" answers the whole burst on the next tick, last EVENT first, with
+// the event id in the OK message. `skip` ids are never answered.
 class FakeWebSocket {
   listeners: Record<string, Listener[]> = {};
   accepted = false;
   closed = false;
-  constructor(private readonly behavior: "ok" | "silent" = "ok") {}
+  sent: string[] = [];
+  private burst: string[] = [];
+  constructor(
+    private readonly behavior: "ok" | "silent" | "reverse" = "ok",
+    private readonly skip: ReadonlySet<string> = new Set(),
+  ) {}
   accept() {
     this.accepted = true;
   }
@@ -51,8 +61,19 @@ class FakeWebSocket {
     (this.listeners[type] ??= []).push(fn);
   }
   send(data: string) {
-    if (this.behavior !== "ok") return;
     const [, event] = JSON.parse(data) as [string, { id: string }];
+    this.sent.push(event.id);
+    if (this.behavior === "silent" || this.skip.has(event.id)) return;
+    if (this.behavior === "reverse") {
+      if (this.burst.push(event.id) === 1) {
+        setTimeout(() => {
+          for (const id of this.burst.reverse()) {
+            this.emit("message", { data: JSON.stringify(["OK", id, true, `ok:${id.slice(-4)}`]) });
+          }
+        }, 0);
+      }
+      return;
+    }
     setTimeout(() => this.emit("message", { data: JSON.stringify(["OK", event.id, true, ""]) }), 0);
   }
   close() {
@@ -65,13 +86,18 @@ class FakeWebSocket {
 
 // fetch stub: the hung relay never answers the upgrade (and ignores abort,
 // the worst case); every other relay upgrades immediately and ACKs.
-function stubRelays(opts: { hung?: string[]; silent?: string[] } = {}) {
-  const hung = new Set((opts.hung ?? [HUNG_RELAY]).map((r) => r.replace(/^wss:/, "https:")));
-  const silent = new Set((opts.silent ?? []).map((r) => r.replace(/^wss:/, "https:")));
+function stubRelays(
+  opts: { hung?: string[]; silent?: string[]; reverse?: string[]; skip?: { relay: string; ids: string[] } } = {},
+) {
+  const https = (r: string) => r.replace(/^wss:/, "https:");
+  const hung = new Set((opts.hung ?? [HUNG_RELAY]).map(https));
+  const silent = new Set((opts.silent ?? []).map(https));
+  const reverse = new Set((opts.reverse ?? []).map(https));
   const sockets: FakeWebSocket[] = [];
   const fetchMock = vi.fn((url: string) => {
     if (hung.has(url)) return new Promise<never>(() => {});
-    const ws = new FakeWebSocket(silent.has(url) ? "silent" : "ok");
+    const skip = opts.skip && https(opts.skip.relay) === url ? new Set(opts.skip.ids) : undefined;
+    const ws = new FakeWebSocket(silent.has(url) ? "silent" : reverse.has(url) ? "reverse" : "ok", skip);
     sockets.push(ws);
     return Promise.resolve({ webSocket: ws } as unknown as Response);
   });
@@ -188,6 +214,117 @@ describe("fanOut with a relay that hangs on the upgrade", () => {
     const silent = results.find((r) => r.relay === "wss://relay.damus.io")!;
     expect(silent.status).toBe("rate-limited-retrying");
     expect(silent.message).toBe("timeout waiting for OK");
+  });
+});
+
+// A Workers invocation gets 6 simultaneous open connections and queues the
+// rest with their connect timers already running, so a big batch must not
+// open a socket per (event, relay).
+describe("fanOutBatch (one socket per relay)", () => {
+  const events = (n: number) => Array.from({ length: n }, (_, i) => makeEvent((i + 1).toString(16).padStart(64, "0")));
+
+  it("sends 40 events over RELAYS.length sockets and maps out-of-order OKs to the right event", async () => {
+    const { fetchMock, sockets } = stubRelays({ hung: [], reverse: [...RELAYS] });
+    const batch = events(40);
+    const p = fanOutBatch(batch);
+    await vi.advanceTimersByTimeAsync(0);
+    const results = await p;
+
+    expect(fetchMock).toHaveBeenCalledTimes(RELAYS.length);
+    expect(RELAYS.length).toBeLessThanOrEqual(6);
+    for (const ws of sockets) {
+      expect(ws.sent).toEqual(batch.map((e) => e.id));
+      expect(ws.closed).toBe(true);
+    }
+    expect(results).toHaveLength(40);
+    results.forEach((acks, i) => {
+      expect(acks.map((a) => a.relay)).toEqual([...RELAYS]);
+      for (const a of acks) {
+        expect(a).toEqual({ relay: a.relay, status: "accepted", accepted: true, message: `ok:${batch[i]!.id.slice(-4)}` });
+      }
+    });
+  });
+
+  it("a relay that never OKs some events: only those events, on that relay, go to retry", async () => {
+    const batch = events(10);
+    const unanswered = batch.filter((_, i) => i % 3 === 0).map((e) => e.id);
+    const { fetchMock } = stubRelays({ hung: [], skip: { relay: "wss://relay.damus.io", ids: unanswered } });
+    const { env, enqueued } = makeRelayPoolEnv();
+    const stub = { storeGiftWrap: async () => ({ ok: true }) as never };
+
+    const p = deliverMemberWraps(
+      batch.map((e) => ({ recipient: "e".repeat(64), wrapSigned: e })),
+      stub as never,
+      env,
+    );
+    await vi.advanceTimersByTimeAsync(batchOkWindowMs(batch.length));
+    const results = await p;
+
+    expect(fetchMock).toHaveBeenCalledTimes(RELAYS.length);
+    results.forEach((r, i) => {
+      const damus = r.acks.find((a) => a.relay === "wss://relay.damus.io")!;
+      if (unanswered.includes(batch[i]!.id)) {
+        expect(damus).toMatchObject({ status: "rate-limited-retrying", message: "timeout waiting for OK" });
+      } else {
+        expect(damus.status).toBe("accepted");
+      }
+      expect(r.acks.filter((a) => a.relay !== "wss://relay.damus.io").every((a) => a.accepted)).toBe(true);
+    });
+    expect(enqueued).toEqual(unanswered.map((id) => ({ id, relays: ["wss://relay.damus.io"] })));
+  });
+
+  it("a hung connect is still bounded at RELAY_CONNECT_TIMEOUT_MS for the whole batch", async () => {
+    stubRelays();
+    const started = Date.now();
+    let settled = false;
+    const p = fanOutBatch(events(40)).then((r) => {
+      settled = true;
+      return r;
+    });
+    await vi.advanceTimersByTimeAsync(RELAY_CONNECT_TIMEOUT_MS - 1);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const results = await p;
+
+    expect(Date.now() - started).toBeLessThanOrEqual(RELAY_CONNECT_TIMEOUT_MS);
+    for (const acks of results) {
+      const hung = acks.find((a) => a.relay === HUNG_RELAY)!;
+      expect(hung.status).toBe("rate-limited-retrying");
+      expect(hung.message).toMatch(/timeout connecting to relay/);
+      expect(acks.filter((a) => a.relay !== HUNG_RELAY).every((a) => a.accepted)).toBe(true);
+    }
+  });
+
+  it("a relay that upgrades but stays silent is bounded by the batch OK window", async () => {
+    stubRelays({ hung: [], silent: ["wss://nostr.mom"] });
+    const batch = events(40);
+    let settled = false;
+    const p = fanOutBatch(batch).then((r) => {
+      settled = true;
+      return r;
+    });
+    await vi.advanceTimersByTimeAsync(batchOkWindowMs(40) - 1);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const results = await p;
+    for (const acks of results) {
+      expect(acks.find((a) => a.relay === "wss://nostr.mom")).toMatchObject({
+        status: "rate-limited-retrying",
+        message: "timeout waiting for OK",
+      });
+    }
+  });
+
+  it("batchOkWindowMs: one event keeps the single OK timeout; big batches cap out", () => {
+    expect(batchOkWindowMs(1)).toBe(RELAY_OK_TIMEOUT_MS);
+    expect(batchOkWindowMs(40)).toBe(RELAY_OK_TIMEOUT_MS + 39 * 100);
+    expect(batchOkWindowMs(10_000)).toBe(RELAY_BATCH_OK_MAX_MS);
+  });
+
+  it("an empty batch opens no sockets", async () => {
+    const { fetchMock } = stubRelays({ hung: [] });
+    expect(await fanOutBatch([])).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

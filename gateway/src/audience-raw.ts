@@ -48,7 +48,9 @@ import {
 } from "./audience-closed-guard";
 import { verifyNip98 } from "./lib/nip98";
 import type { NostrEvent, RelayPool } from "./relay-pool";
-import { fanOut, rateLimitCheck, type RelayResult } from "./publish";
+import { enqueueRelayRetries, fanOut, fanOutBatch, rateLimitCheck, type RelayResult } from "./publish";
+import { deliverMemberWraps, DO_CALL_CONCURRENCY } from "./audience";
+import { mapWithConcurrency } from "./lib/concurrency";
 
 export type AudienceRawEnv = AuthEnv & KmsEnv & {
   RELAY_POOL: DurableObjectNamespace<RelayPool>;
@@ -246,36 +248,56 @@ export async function publishAndStore(
   signed: SignedEvent,
   env: AudienceRawEnv,
 ): Promise<PublishOutcome> {
-  const acks = await fanOut(signed);
+  return settlePublish(signed, await fanOut(signed), env);
+}
+
+// publishAndStore for many events: one relay batch (one socket per relay),
+// then each event settles on its own. Outcomes keep the input order.
+async function publishAllAndStore(
+  events: readonly SignedEvent[],
+  env: AudienceRawEnv,
+): Promise<PublishOutcome[]> {
+  const acks = await fanOutBatch(events);
+  return mapWithConcurrency(events, DO_CALL_CONCURRENCY, (signed, i) =>
+    settlePublish(signed, acks[i]!, env),
+  );
+}
+
+// Everything after the relay fan-out: queue retries, log a publish no relay
+// took, and cache what was accepted.
+async function settlePublish(
+  signed: SignedEvent,
+  acks: RelayResult[],
+  env: AudienceRawEnv,
+): Promise<PublishOutcome> {
+  // Relays that timed out or were rate-limited go to the DO retry queue, as on
+  // the custodial audience paths. Before 2026-09-27 the raw routes skipped
+  // this, so a relay that missed a declaration/grant/claim never got it.
+  await enqueueRelayRetries(env, signed, acks);
   const accepted = acks.some((r) => r.status === "accepted");
+  if (!accepted) {
+    console.error("[raw publishAndStore] not-accepted", {
+      kind: signed.kind,
+      id: signed.id,
+      ack_summary: acks.map((a) => `${a.relay}:${a.status}`),
+    });
+  }
   if (accepted) {
     try {
       const id = env.RELAY_POOL.idFromName("main");
       const stub = env.RELAY_POOL.get(id);
-      await stub.storeAudienceEvent(signed).catch(() => {});
+      await stub.storeAudienceEvent(signed).catch((err: unknown) => {
+        console.error("[raw publishAndStore] storeAudienceEvent threw", {
+          kind: signed.kind,
+          id: signed.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
     } catch {
       // best-effort cache.
     }
   }
   return { signed, acks, accepted };
-}
-
-async function publishGiftWrap(
-  signed: SignedEvent,
-  recipient: string,
-  env: AudienceRawEnv,
-): Promise<RelayResult[]> {
-  const acks = await fanOut(signed);
-  if (acks.some((r) => r.status === "accepted")) {
-    try {
-      const id = env.RELAY_POOL.idFromName("main");
-      const stub = env.RELAY_POOL.get(id);
-      await stub.storeGiftWrap(signed, recipient).catch(() => {});
-    } catch {
-      // best-effort.
-    }
-  }
-  return acks;
 }
 
 // ─── /v0/audience/raw/create ───────────────────────────────────────────────
@@ -628,22 +650,15 @@ async function runRotate(
   // silently broke partial-failure detection — admit's `g.relay_acks ?? []`
   // saw `undefined`, treated rejection as success, and never reported the
   // partial_rotate. Surface `accepted` explicitly so callers don't re-derive.
-  const grantOuts: {
-    recipient: string;
-    event_id: string;
-    accepted: boolean;
-    relay_acks: RelayResult[];
-  }[] = [];
-  for (const g of body.grants) {
-    const recipient = g.tags.find((t) => t[0] === "p")?.[1] ?? "";
-    const out = await publishAndStore(g, env);
-    grantOuts.push({
-      recipient,
-      event_id: g.id,
-      accepted: out.accepted,
-      relay_acks: out.acks,
-    });
-  }
+  // Grants go out as one relay batch (they were sequential until
+  // 2026-09-27); `grants` keeps the request order.
+  const published = await publishAllAndStore(body.grants, env);
+  const grantOuts = body.grants.map((g, i) => ({
+    recipient: g.tags.find((t) => t[0] === "p")?.[1] ?? "",
+    event_id: g.id,
+    accepted: published[i]!.accepted,
+    relay_acks: published[i]!.acks,
+  }));
 
   return jsonResponse({
     ok: true,
@@ -839,21 +854,23 @@ async function runProcessClaims(
   const lookup: AudienceLookup = {
     currentDeclarationByAddress: () => cached.decl,
   };
-  const claimed: { invite_pub: string; claim_pubkey: string; claim_event_id: string }[] = [];
-  for (const pending of cached.decl.pending) {
+  // One cache read per pending invite; they're independent, so run them
+  // together (bounded) and keep the declaration's pending order.
+  const found = await mapWithConcurrency(cached.decl.pending, DO_CALL_CONCURRENCY, async (pending) => {
     const dTag = `${slug}:${cached.decl.epoch}:${pending.invitePub}`;
     const claimEvt = await stub.getObject(30522, pending.invitePub, dTag);
-    if (!claimEvt) continue;
+    if (!claimEvt) return null;
     const claimPubTag = claimEvt.tags.find((t) => t[0] === "fa:claim-pubkey")?.[1];
-    if (!claimPubTag) continue;
+    if (!claimPubTag) return null;
     const validation = validateAudienceClaimEvent(claimEvt, lookup);
-    if (!validation.ok) continue;
-    claimed.push({
+    if (!validation.ok) return null;
+    return {
       invite_pub: pending.invitePub,
       claim_pubkey: claimPubTag,
       claim_event_id: claimEvt.id,
-    });
-  }
+    };
+  });
+  const claimed = found.filter((c): c is NonNullable<typeof c> => c !== null);
   return jsonResponse({ ok: true, claimed });
 }
 
@@ -911,12 +928,25 @@ async function runPublishWraps(
     }
   }
 
-  const wraps: { recipient: string; event_id: string; relay_acks: RelayResult[] }[] = [];
-  for (const w of body.gift_wraps) {
-    const recipient = w.tags.find((t) => t[0] === "p")?.[1] ?? "";
-    const acks = await publishGiftWrap(w, recipient, env);
-    wraps.push({ recipient, event_id: w.id, relay_acks: acks });
-  }
+  // Same delivery as the custodial path: every wrap is cached first, then
+  // all of them go to the relays in one batch (one socket per relay), with
+  // transient relay failures queued for retry. Until 2026-09-27 this was one
+  // wrap at a time (a 40-wrap call took ~3.5 min), cached only after a relay
+  // accepted, and never retried. `gift_wraps` keeps the request order.
+  const stub = env.RELAY_POOL.get(env.RELAY_POOL.idFromName("main"));
+  const delivered = await deliverMemberWraps(
+    body.gift_wraps.map((w) => ({
+      recipient: w.tags.find((t) => t[0] === "p")?.[1] ?? "",
+      wrapSigned: w,
+    })),
+    stub,
+    env,
+  );
+  const wraps = delivered.map((d) => ({
+    recipient: d.recipient,
+    event_id: d.event_id,
+    relay_acks: d.acks,
+  }));
 
   return jsonResponse({
     ok: true,

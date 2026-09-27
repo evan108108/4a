@@ -967,7 +967,7 @@ export class RelayPool extends DurableObject<unknown> {
   }
 
   // Fresh-socket single-event publish, used by the retry queue. Mirrors the
-  // shape of publish.ts:publishToRelay but lives inside the DO so we don't
+  // shape of publish.ts:publishBatchToRelay but lives inside the DO so we don't
   // need to plumb a worker-side helper through. Returns one of three
   // outcomes; the caller decides whether to delete or reschedule.
   private async publishOnce(
