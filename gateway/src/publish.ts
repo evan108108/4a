@@ -33,6 +33,7 @@ import {
   type OrgBody,
 } from "./org-builder";
 import { classifyRejection, RELAYS, type RelayPool } from "./relay-pool";
+import { connectRelaySocket } from "./lib/relay-connect";
 
 export type PublishEnv = AuthEnv & KmsEnv & {
   RELAY_POOL: DurableObjectNamespace<RelayPool>;
@@ -42,7 +43,12 @@ const CONTEXT_URL = "https://4a4.ai/ns/v0";
 const MAX_CONTENT_BYTES = 10 * 1024;
 const RATE_LIMIT_PER_HOUR = 60;
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
-const RELAY_OK_TIMEOUT_MS = 3000;
+// Per-relay bounds for the publish fan-out. The upgrade (connect) and the
+// wait for OK are bounded separately, so one relay costs at most
+// RELAY_CONNECT_TIMEOUT_MS + RELAY_OK_TIMEOUT_MS before it is handed to the
+// DO retry queue. See lib/relay-connect.ts for why the connect bound exists.
+export const RELAY_CONNECT_TIMEOUT_MS = 3000;
+export const RELAY_OK_TIMEOUT_MS = 3000;
 const HEX64 = /^[0-9a-f]{64}$/i;
 
 const KIND_OBSERVATION = 30500;
@@ -148,8 +154,7 @@ async function publishToRelay(relay: string, event: SignedEvent): Promise<RelayR
   const httpUrl = relay.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
   let ws: WebSocket | null = null;
   try {
-    const response = await fetch(httpUrl, { headers: { Upgrade: "websocket" } });
-    ws = response.webSocket;
+    ws = await connectRelaySocket(httpUrl, RELAY_CONNECT_TIMEOUT_MS);
     if (!ws) {
       return {
         relay,
@@ -223,8 +228,39 @@ async function publishToRelay(relay: string, event: SignedEvent): Promise<RelayR
   }
 }
 
+// Publish to every relay in parallel. Each relay is bounded (connect + OK),
+// so the whole fan-out returns within RELAY_CONNECT_TIMEOUT_MS +
+// RELAY_OK_TIMEOUT_MS no matter how any single relay behaves.
 export async function fanOut(event: SignedEvent): Promise<RelayResult[]> {
   return Promise.all(RELAYS.map((relay) => publishToRelay(relay, event)));
+}
+
+// Hand every transiently-failed relay ("rate-limited-retrying", which includes
+// connect/OK timeouts) to the RelayPool DO retry queue. The queue is bounded:
+// one record per (event, relay), RETRY_MAX_ATTEMPTS with jittered backoff,
+// deleted on accept / permanent failure / exhaustion. Enqueue failures are
+// logged and never propagate: the publish response is already decided.
+export async function enqueueRelayRetries(
+  env: { RELAY_POOL: DurableObjectNamespace<RelayPool> },
+  event: SignedEvent,
+  results: RelayResult[],
+): Promise<void> {
+  const retryRelays = results
+    .filter((r) => r.status === "rate-limited-retrying")
+    .map((r) => r.relay);
+  if (retryRelays.length === 0) return;
+  try {
+    const stub = env.RELAY_POOL.get(env.RELAY_POOL.idFromName("main"));
+    // Pass the SignedEvent as a plain NostrEvent — the DO re-validates id+sig.
+    await stub.enqueueRetry(event, retryRelays);
+  } catch (err) {
+    console.error("[enqueueRelayRetries] enqueue failed", {
+      kind: event.kind,
+      id: event.id,
+      relays: retryRelays,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 // ─── response helpers ───────────────────────────────────────────────────────
@@ -599,24 +635,10 @@ export async function runPublish(
     const accepted = relayResults.filter((r) => r.status === "accepted").length;
 
     // Enqueue any rate-limited-retrying relays on the DO so the alarm-driven
-    // retry queue takes over. Don't await — the DO call is fire-and-forget;
-    // a failure to enqueue must not break the publish response. No-op when
-    // there's nothing to retry.
-    const retryRelays = relayResults
-      .filter((r) => r.status === "rate-limited-retrying")
-      .map((r) => r.relay);
-    if (retryRelays.length > 0) {
-      try {
-        const id = env.RELAY_POOL.idFromName("main");
-        const stub = env.RELAY_POOL.get(id);
-        // Pass the SignedEvent as a plain NostrEvent — the DO re-validates id+sig.
-        await stub.enqueueRetry(signed, retryRelays);
-      } catch {
-        // Retry-queue failures must not propagate. We've already accepted on
-        // ≥1 relay (or returned 502 below); the read path is the source of
-        // truth for whether the event reached the network.
-      }
-    }
+    // retry queue takes over. A failure to enqueue is logged and must not
+    // break the publish response (we've already accepted on ≥1 relay, or
+    // return 502 below). No-op when there's nothing to retry.
+    await enqueueRelayRetries(env, signed, relayResults);
 
     if (accepted === 0) {
       return {

@@ -23,6 +23,7 @@ import { WRAP_CURSOR } from "./lib/wrap-cursor";
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { blake3ContentTag } from "./lib/blake3-tag";
+import { connectRelaySocket } from "./lib/relay-connect";
 
 // Default relay set (2026-04-27 hardening). nostr.wine dropped — paid relay,
 // requires admission payment + restricted_writes:true (NIP-11 confirmed
@@ -92,6 +93,11 @@ const RETRY_MAX_MS = 5 * 60 * 1000;
 const RETRY_MAX_ATTEMPTS = 4;
 const RETRY_JITTER = 0.25;
 const RETRY_PUBLISH_TIMEOUT_MS = 5_000;
+// Bound on every outbound WebSocket upgrade from this DO (retry publishes,
+// ingest subscriptions, replay). A relay that holds the upgrade (nos.lol's
+// nginx does, for 60 s) must not stall an alarm tick or the sequential
+// reconnect loop. See lib/relay-connect.ts.
+const RELAY_CONNECT_TIMEOUT_MS = 3_000;
 
 const EVENT_PREFIX = "event:";
 const COMMONS_PREFIX = "event:30504:";
@@ -970,10 +976,7 @@ export class RelayPool extends DurableObject<unknown> {
   ): Promise<"accepted" | "rate-limited-retrying" | "failed-permanent"> {
     let ws: WebSocket | null = null;
     try {
-      const response = await fetch(relayHttpUrl(relay), {
-        headers: { Upgrade: "websocket" },
-      });
-      ws = response.webSocket;
+      ws = await connectRelaySocket(relayHttpUrl(relay), RELAY_CONNECT_TIMEOUT_MS);
       if (!ws) return "rate-limited-retrying";
       ws.accept();
 
@@ -1032,10 +1035,9 @@ export class RelayPool extends DurableObject<unknown> {
   }
 
   private async openRelay(relay: string): Promise<void> {
-    const response = await fetch(relayHttpUrl(relay), {
-      headers: { Upgrade: "websocket" },
-    });
-    const ws = response.webSocket;
+    // A connect timeout throws; ensureConnected catches it and schedules a
+    // reconnect, same as a failed upgrade.
+    const ws = await connectRelaySocket(relayHttpUrl(relay), RELAY_CONNECT_TIMEOUT_MS);
     if (!ws) throw new Error(`relay ${relay} did not upgrade to WebSocket`);
     ws.accept();
 
@@ -1108,10 +1110,7 @@ export class RelayPool extends DurableObject<unknown> {
 
       (async () => {
         try {
-          const response = await fetch(relayHttpUrl(relay), {
-            headers: { Upgrade: "websocket" },
-          });
-          ws = response.webSocket;
+          ws = await connectRelaySocket(relayHttpUrl(relay), RELAY_CONNECT_TIMEOUT_MS);
           if (!ws) {
             clearTimeout(timer);
             return finish(0);

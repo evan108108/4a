@@ -79,7 +79,7 @@ import {
 } from "./audience-closed-guard";
 import type { NostrEvent, RelayPool, StoredWrap } from "./relay-pool";
 import { WRAP_CURSOR } from "./lib/wrap-cursor";
-import { fanOut, rateLimitCheck, type RelayResult } from "./publish";
+import { enqueueRelayRetries, fanOut, rateLimitCheck, type RelayResult } from "./publish";
 
 export type AudienceEnv = AuthEnv & KmsEnv & {
   RELAY_POOL: DurableObjectNamespace<RelayPool>;
@@ -190,11 +190,52 @@ interface PublishOutcome {
   accepted: boolean;
 }
 
+export interface MemberWrap {
+  recipient: string;
+  wrapSigned: SignedEvent;
+}
+
+export interface MemberWrapResult {
+  recipient: string;
+  event_id: string;
+  acks: RelayResult[];
+}
+
+// Deliver one gift-wrap per member, all members in parallel. Each wrap is
+// cached in the relay-pool DO first (so the inbox/stream never waits on
+// relays), then fanned out, and any transiently-failed relays go to the retry
+// queue. Results keep the input (member) order. Exported for tests.
+export async function deliverMemberWraps(
+  memberWraps: MemberWrap[],
+  stub: Pick<DurableObjectStub<RelayPool>, "storeGiftWrap">,
+  env: Pick<AudienceEnv, "RELAY_POOL">,
+): Promise<MemberWrapResult[]> {
+  return Promise.all(
+    memberWraps.map(async ({ recipient, wrapSigned }) => {
+      await stub.storeGiftWrap(wrapSigned, recipient).catch((err: unknown) => {
+        console.error("[audience publish] storeGiftWrap threw", {
+          id: wrapSigned.id,
+          recipient,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+      const acks = await fanOut(wrapSigned);
+      await enqueueRelayRetries(env, wrapSigned, acks);
+      return { recipient, event_id: wrapSigned.id, acks };
+    }),
+  );
+}
+
 async function publishAndStore(
   signed: SignedEvent,
   env: AudienceEnv,
 ): Promise<PublishOutcome> {
   const acks = await fanOut(signed);
+  // Relays that timed out or were rate-limited go to the DO retry queue, as
+  // on the /v0/publish and /v0/score paths. Before 2026-09-27 the audience
+  // paths skipped this, so a relay that missed a declaration/grant/claim
+  // never got it.
+  await enqueueRelayRetries(env, signed, acks);
   const accepted = acks.some((r) => r.status === "accepted");
   if (!accepted) {
     console.error("[publishAndStore] not-accepted", {
@@ -990,8 +1031,10 @@ async function runRotate(
   const granterIsMember = newMembers.some((m) => m.toLowerCase() === granterPub.toLowerCase());
   const grantSigningPriv = granterIsMember ? granterPriv : body.aud_id_priv;
 
-  const grantOuts: { recipient: string; event_id: string; acks: RelayResult[] }[] = [];
-  for (const recipient of newMembers) {
+  // Sign every grant up front (synchronous, needs the private keys), then
+  // publish them in parallel. Publishing one member at a time made each
+  // member's relay fan-out add to the response time.
+  const signedGrants = newMembers.map((recipient) => {
     const ciphertext = nip44Encrypt(epochKp.priv, grantSigningPriv, recipient);
     const grantTpl = buildKeyGrant({
       audIdPub,
@@ -1000,10 +1043,15 @@ async function runRotate(
       recipientPub: recipient,
       ciphertext,
     });
-    const grantSigned = signEventWithRawKey(grantTpl, grantSigningPriv);
-    const out = await publishAndStore(grantSigned, env);
-    grantOuts.push({ recipient, event_id: grantSigned.id, acks: out.acks });
-  }
+    return { recipient, grantSigned: signEventWithRawKey(grantTpl, grantSigningPriv) };
+  });
+  const grantOuts: { recipient: string; event_id: string; acks: RelayResult[] }[] =
+    await Promise.all(
+      signedGrants.map(async ({ recipient, grantSigned }) => {
+        const out = await publishAndStore(grantSigned, env);
+        return { recipient, event_id: grantSigned.id, acks: out.acks };
+      }),
+    );
 
   granterPriv.fill(0);
 
@@ -1101,20 +1149,23 @@ async function runAudiencePublish(
   });
   const rumor = signEventWithRawKey(rumorTpl, publisherPriv);
 
-  // 3. For each member, gift-wrap the rumor, publish the wrap, and cache it
-  //    in the relay-pool DO under the recipient's giftwrap index so the same-
-  //    instance inbox endpoint can read it without an external subscription.
-  const wraps: { recipient: string; event_id: string; acks: RelayResult[] }[] = [];
+  // 3. Gift-wrap the rumor for every member up front (synchronous, needs
+  //    publisherPriv), then handle the members in parallel. For each one:
+  //    cache the wrap in the relay-pool DO under the recipient's giftwrap
+  //    index FIRST, so the same-instance inbox/stream sees it without waiting
+  //    on relays; then fan it out and hand slow relays to the retry queue.
+  //    The wrap was always cached regardless of relay acceptance, so only the
+  //    order changed. Handling members one at a time (before 2026-09-27) made
+  //    the relay fan-outs add together.
   const id = env.RELAY_POOL.idFromName("main");
   const stub = env.RELAY_POOL.get(id);
-  for (const recipient of cached.decl.members) {
-    const wrapSigned: SignedEvent = giftWrapEvent(rumor, publisherPriv, recipient);
-    const acks = await fanOut(wrapSigned);
-    await stub.storeGiftWrap(wrapSigned, recipient).catch(() => {});
-    wraps.push({ recipient, event_id: wrapSigned.id, acks });
-  }
-
+  const memberWraps = cached.decl.members.map((recipient) => ({
+    recipient,
+    wrapSigned: giftWrapEvent(rumor, publisherPriv, recipient) as SignedEvent,
+  }));
   publisherPriv.fill(0);
+
+  const wraps = await deliverMemberWraps(memberWraps, stub, env);
 
   return jsonResponse({
     ok: true,

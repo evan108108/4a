@@ -24,7 +24,7 @@ import {
   type SignedEvent,
 } from "./kms";
 import type { RelayPool } from "./relay-pool";
-import { fanOut, rateLimitCheck, type RelayResult } from "./publish";
+import { enqueueRelayRetries, fanOut, rateLimitCheck, type RelayResult } from "./publish";
 import { validateScoreEvent } from "./score-validator";
 import { validateCommentEvent } from "./comment-validator";
 
@@ -192,19 +192,7 @@ async function publishSigned(
   env: ScoreEnv,
 ): Promise<RelayResult[]> {
   const results = await fanOut(signed);
-  const retryRelays = results
-    .filter((r) => r.status === "rate-limited-retrying")
-    .map((r) => r.relay);
-  if (retryRelays.length > 0) {
-    try {
-      const id = env.RELAY_POOL.idFromName("main");
-      const stub = env.RELAY_POOL.get(id);
-      await stub.enqueueRetry(signed, retryRelays);
-    } catch {
-      // Retry-queue failures must not propagate. Read path is the source of
-      // truth for whether the event reached the network.
-    }
-  }
+  await enqueueRelayRetries(env, signed, results);
   return results;
 }
 
