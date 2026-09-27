@@ -143,7 +143,7 @@ export const VIEWER_JS = `"use strict";
   function renderFramed(plaintext, type) {
     var url = URL.createObjectURL(new Blob([plaintext], { type: withCharsetIfText(type) }));
     var frame = document.createElement("iframe");
-    frame.setAttribute("sandbox", "allow-scripts");
+    frame.setAttribute("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox");
     frame.setAttribute("referrerpolicy", "no-referrer");
     frame.setAttribute("title", "artifact content");
     frame.id = "artifact-frame";

@@ -175,12 +175,15 @@ describe("viewer shell template", () => {
     expect(VIEWER_HTML).toContain(`src="/v0/artifacts/viewer.js?v=${VIEWER_JS_HASH}"`);
   });
 
-  it("iframe sandbox is allow-scripts only", () => {
-    expect(VIEWER_JS).toContain('setAttribute("sandbox", "allow-scripts")');
+  // Popups are allowed (and escape the sandbox) so links inside an artifact can open
+  // in a new tab — Evan asked for working external links (2026-09-24). The containment
+  // that matters stays: no same-origin, no forms, no top-level navigation of the viewer.
+  it("iframe sandbox is allow-scripts + popups only", () => {
+    expect(VIEWER_JS).toContain('setAttribute("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox")');
     expect(VIEWER_SOURCE).not.toContain("allow-same-origin");
     expect(VIEWER_SOURCE).not.toContain("allow-forms");
-    expect(VIEWER_SOURCE).not.toContain("allow-popups");
     expect(VIEWER_SOURCE).not.toContain("allow-top-navigation");
+    expect(VIEWER_SOURCE).not.toContain("allow-modals");
   });
 
   it("the shell's only network fetch is the blossom ciphertext", () => {
