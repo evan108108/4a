@@ -51,6 +51,26 @@ const AUDIENCE_KINDS = [30510, 30511, 30512, 30513, 30514, 30520, 30521, 30522] 
 // Gift-wraps (kind:1059) are recipient-addressable but carry no `d` tag, so
 // they're stored under a separate prefix indexed by recipient pubkey.
 const GIFT_WRAP_PREFIX = "giftwrap:";
+// Upper bound on keys read by one wrap-page storage.list (covers the SSE
+// replay max of 1000). Callers page with cursors beyond this.
+const WRAP_PAGE_MAX = 1000;
+// Opaque wrap cursor: "<12-digit receive second>:<wrap id>".
+const WRAP_CURSOR = /^\d{12}:[0-9a-f]{64}$/;
+
+/** A stored wrap plus its authoritative receive time and resume cursor. */
+export interface StoredWrap {
+  event: NostrEvent;
+  /** Server-receive unix seconds (from the storage key). */
+  receivedAt: number;
+  /** Opaque, exclusive resume cursor: "<12-digit receivedAt>:<wrap id>". */
+  cursor: string;
+}
+
+export interface WrapPage {
+  entries: StoredWrap[];
+  /** True when the scan reached the end of the recipient's wraps. */
+  exhausted: boolean;
+}
 
 // Webhook-relay wraps live under their own prefix so hook retention can be
 // swept without touching audience replay, and so the inbox stream can tail
@@ -381,8 +401,9 @@ export class RelayPool extends DurableObject<unknown> {
 
   /**
    * Cache a kind:1059 gift-wrap addressed to the given recipient pubkey.
-   * Indexed by `giftwrap:<recipient>:<created_at>:<id>` so /audience/:slug/inbox
-   * can list-by-prefix for a recipient + apply a `since` filter.
+   * Indexed by `giftwrap:<recipient>:<12-digit server-receive second>:<id>` so
+   * /audience/:slug/inbox and the SSE stream can range-scan a recipient's
+   * wraps in receive order from a `since` cursor (see listWrapPage).
    *
    * The gateway's /audience/publish path calls this for every gift-wrap it
    * fans out, so a same-instance publisher → inbox reader pair (e.g. the
@@ -428,10 +449,46 @@ export class RelayPool extends DurableObject<unknown> {
   }
 
   /**
-   * Fetch cached gift-wraps addressed to `recipient`. Optional `sinceUnix`
-   * filters to wraps with `created_at >= sinceUnix` (best-effort; the gift-
-   * wrap created_at is jittered in the past per NIP-59). Returns up to
-   * `limit` events, oldest-first.
+   * Bounded, receive-time-ordered page of wraps stored under `prefix`
+   * (`giftwrap:<recipient>:` or `hookwrap:<recipient>:`).
+   *
+   * Keys are `<prefix><12-digit receive second>:<wrap id>`, so lexicographic
+   * key order IS (receivedAt, id) order and a `since` filter is just a range
+   * start — no full-prefix scan. The key's timestamp is authoritative:
+   * legacy audience wraps stored before 7ab9d47 (May 2026) have the same key
+   * shape but no `_receivedAt` field and carry the wrap's NIP-59 `created_at`
+   * in the key; they are ordered and filtered by that key value. No data
+   * migration is needed.
+   *
+   * `afterCursor` (`<12-digit ts>:<id>`, exclusive) takes precedence over
+   * `sinceUnix` (inclusive, in seconds). `exhausted` is true when the scan
+   * reached the end of the recipient's keys.
+   */
+  private async listWrapPage(
+    prefix: string,
+    opts: { sinceUnix?: number; afterCursor?: string; limit?: number },
+  ): Promise<WrapPage> {
+    const limit = Math.max(1, Math.min(Math.floor(opts.limit ?? 100), WRAP_PAGE_MAX));
+    const listOpts: DurableObjectListOptions = { prefix, limit };
+    if (opts.afterCursor !== undefined && WRAP_CURSOR.test(opts.afterCursor)) {
+      listOpts.startAfter = prefix + opts.afterCursor;
+    } else if (opts.sinceUnix !== undefined && Number.isFinite(opts.sinceUnix) && opts.sinceUnix > 0) {
+      listOpts.start = prefix + String(Math.floor(opts.sinceUnix)).padStart(12, "0");
+    }
+    const list = await this.ctx.storage.list<NostrEvent & { _receivedAt?: number }>(listOpts);
+    const entries: StoredWrap[] = [];
+    for (const [key, ev] of list) {
+      const cursor = key.slice(prefix.length);
+      const { _receivedAt: _drop, ...clean } = ev;
+      entries.push({ event: clean as NostrEvent, receivedAt: Number(cursor.slice(0, 12)), cursor });
+    }
+    return { entries, exhausted: list.size < limit };
+  }
+
+  /**
+   * Fetch cached gift-wraps addressed to `recipient` with server-receive time
+   * `>= sinceUnix`, oldest-received first, at most `limit` (≤ WRAP_PAGE_MAX).
+   * One bounded storage.list range read (see listWrapPage).
    */
   async listGiftWraps(
     recipient: string,
@@ -439,39 +496,11 @@ export class RelayPool extends DurableObject<unknown> {
     limit = 100,
   ): Promise<NostrEvent[]> {
     if (!/^[0-9a-f]{64}$/i.test(recipient)) return [];
-    const list = await this.ctx.storage.list<NostrEvent & { _receivedAt?: number }>({
-      prefix: `${GIFT_WRAP_PREFIX}${recipient.toLowerCase()}:`,
+    const page = await this.listWrapPage(`${GIFT_WRAP_PREFIX}${recipient.toLowerCase()}:`, {
+      sinceUnix,
+      limit,
     });
-    const out: NostrEvent[] = [];
-    let totalSeen = 0;
-    let withReceivedAt = 0;
-    let newestReceivedAt: number | null = null;
-    for (const ev of list.values()) {
-      totalSeen++;
-      const receivedAt = ev._receivedAt;
-      if (typeof receivedAt === "number") {
-        withReceivedAt++;
-        if (newestReceivedAt === null || receivedAt > newestReceivedAt) newestReceivedAt = receivedAt;
-      }
-      if (sinceUnix !== undefined && typeof receivedAt === "number" && receivedAt < sinceUnix) continue;
-      const { _receivedAt: _drop, ...clean } = ev;
-      out.push(clean as NostrEvent);
-      if (out.length >= limit) break;
-    }
-    if (totalSeen > 0 || (sinceUnix !== undefined && out.length > 0)) {
-      console.log("[listGiftWraps]", {
-        recipient: recipient.toLowerCase().slice(0, 12),
-        sinceUnix: sinceUnix ?? null,
-        total_seen: totalSeen,
-        with_received_at: withReceivedAt,
-        returned: out.length,
-        newest_received_at: newestReceivedAt,
-        diff_newest_minus_since: sinceUnix !== undefined && newestReceivedAt !== null
-          ? newestReceivedAt - sinceUnix
-          : null,
-      });
-    }
-    return out;
+    return page.entries.map((e) => e.event);
   }
 
   /**
@@ -547,18 +576,11 @@ export class RelayPool extends DurableObject<unknown> {
     // Read-path prune: an active subscriber self-cleans even when the
     // recipient isn't currently receiving writes.
     await this.pruneExpiredHookWraps(recipient);
-    const list = await this.ctx.storage.list<NostrEvent & { _receivedAt?: number }>({
-      prefix: `${HOOK_WRAP_PREFIX}${recipient.toLowerCase()}:`,
+    const page = await this.listWrapPage(`${HOOK_WRAP_PREFIX}${recipient.toLowerCase()}:`, {
+      sinceUnix,
+      limit,
     });
-    const out: NostrEvent[] = [];
-    for (const ev of list.values()) {
-      const receivedAt = ev._receivedAt;
-      if (sinceUnix !== undefined && typeof receivedAt === "number" && receivedAt < sinceUnix) continue;
-      const { _receivedAt: _drop, ...clean } = ev;
-      out.push(clean as NostrEvent);
-      if (out.length >= limit) break;
-    }
-    return out;
+    return page.entries.map((e) => e.event);
   }
 
   /**
