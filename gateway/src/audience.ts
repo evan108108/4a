@@ -77,7 +77,8 @@ import {
   loadAudienceStatus as loadAudienceStatusGuard,
   rejectIfClosed as rejectIfClosedGuard,
 } from "./audience-closed-guard";
-import type { NostrEvent, RelayPool } from "./relay-pool";
+import type { NostrEvent, RelayPool, StoredWrap } from "./relay-pool";
+import { WRAP_CURSOR } from "./lib/wrap-cursor";
 import { fanOut, rateLimitCheck, type RelayResult } from "./publish";
 
 export type AudienceEnv = AuthEnv & KmsEnv & {
@@ -1153,6 +1154,9 @@ async function runAudiencePublish(
 
 interface InboxItem {
   event_id: string;
+  /** Server-receive unix seconds of the gift-wrap that carried this item —
+   * the axis `since` / `next_since` page on. */
+  received_at: number;
   kind: number;
   audience_slug: string;
   epoch: number;
@@ -1165,6 +1169,7 @@ interface InboxItem {
 async function runInbox(
   slugFromPath: string,
   since: number | undefined,
+  cursor: string | undefined,
   limit: number,
   claims: AuthClaims,
   env: AudienceEnv,
@@ -1175,86 +1180,44 @@ async function runInbox(
   try {
     const id = env.RELAY_POOL.idFromName("main");
     const stub = env.RELAY_POOL.get(id);
-    const wraps = await stub.listGiftWraps(callerPub, since, limit * 4);
-
-    // Walk wraps, attempt unwrap. Failures are silently dropped — gift-wraps
-    // for other recipients land here too if a future shared-pool config
-    // exists; either way unwrap fails for those.
+    // Walk wraps in server-receive order, in bounded pages, examining at most
+    // limit*4 wraps per request (the same CPU budget as before). Unwrap
+    // failures and other-audience items are skipped but still CONSUMED, so
+    // the returned cursor moves past them.
+    //
+    // Cursor contract (additive; since/limit unchanged):
+    //   next_since  — received_at of the last wrap examined. Inclusive: pass
+    //                 it back as ?since= and dedupe items by event_id.
+    //   next_cursor — opaque "<receivedAt>:<wrapId>" of the same wrap. Pass it
+    //                 back as ?cursor= for an exact, exclusive resume (no dups,
+    //                 no stall when many wraps share one second).
+    //   has_more    — false only when every wrap up to now was examined.
+    const examineBudget = limit * 4;
     const items: InboxItem[] = [];
-    for (const w of wraps) {
-      let unwrapped;
-      try {
-        unwrapped = giftUnwrap(w, callerPriv);
-      } catch {
-        continue;
-      }
-      const rumor = unwrapped.rumor;
-      // Filter by audience slug from the path.
-      const aTag = rumor.tags.find((t) => t[0] === "a")?.[1];
-      if (!aTag) continue;
-      const parsedAddr = parseAudienceAddress(aTag);
-      if (!parsedAddr || parsedAddr.slug !== slugFromPath) continue;
-
-      const fa_epoch = Number(rumor.tags.find((t) => t[0] === "fa:epoch")?.[1] ?? NaN);
-      if (!Number.isSafeInteger(fa_epoch)) continue;
-
-      // Find the matching kind:30521 key-grant addressed to us for this audience+epoch.
-      const grantD = `${parsedAddr.slug}:${fa_epoch}:${callerPub}`;
-      // The grant could be signed by aud_id (founding) or any current member.
-      // Try aud_id first, then walk the declaration's member list.
-      let grantEvent: NostrEvent | null = await stub.getObject(30521, parsedAddr.pubkey, grantD);
-      if (!grantEvent) {
-        // Fall back: scan members of the current declaration as potential granters.
-        const decl = await stub.getObject(30520, parsedAddr.pubkey, parsedAddr.slug);
-        if (decl) {
-          const members = decl.tags.filter((t) => t[0] === "p").map((t) => t[1]!);
-          for (const m of members) {
-            const candidate = await stub.getObject(30521, m, grantD);
-            if (candidate) {
-              grantEvent = candidate;
-              break;
-            }
-          }
+    let examined = 0;
+    let lastConsumed: StoredWrap | undefined;
+    let hasMore = false;
+    let pageOpts: { sinceUnix?: number; afterCursor?: string } =
+      cursor !== undefined ? { afterCursor: cursor } : { sinceUnix: since };
+    scan: while (true) {
+      const page = await stub.listGiftWrapPage(callerPub, {
+        ...pageOpts,
+        limit: Math.min(examineBudget - examined, 1000),
+      });
+      for (let i = 0; i < page.entries.length; i++) {
+        const entry = page.entries[i]!;
+        examined++;
+        lastConsumed = entry;
+        const isLastKnown = page.exhausted && i === page.entries.length - 1;
+        const item = await unwrapInboxItem(entry, slugFromPath, callerPriv, callerPub, stub);
+        if (item) items.push(item);
+        if (items.length >= limit || examined >= examineBudget) {
+          hasMore = !isLastKnown;
+          break scan;
         }
       }
-      if (!grantEvent) continue;
-
-      let epochPrivBytes: Uint8Array;
-      try {
-        epochPrivBytes = nip44Decrypt(grantEvent.content, callerPriv, grantEvent.pubkey);
-      } catch {
-        continue;
-      }
-      if (epochPrivBytes.length !== 32) continue;
-
-      let plaintext: string;
-      try {
-        plaintext = nip44DecryptString(rumor.content, epochPrivBytes, unwrapped.publisherPub);
-      } catch {
-        // Defensive zero-fill the leaked epoch priv on this branch too.
-        epochPrivBytes.fill(0);
-        continue;
-      }
-      let parsedPayload: unknown = plaintext;
-      try {
-        parsedPayload = JSON.parse(plaintext);
-      } catch {
-        // payload wasn't JSON — leave as string.
-      }
-      epochPrivBytes.fill(0);
-
-      const dTag = rumor.tags.find((t) => t[0] === "d")?.[1];
-      items.push({
-        event_id: rumor.id,
-        kind: rumor.kind,
-        audience_slug: parsedAddr.slug,
-        epoch: fa_epoch,
-        publisher_pubkey: unwrapped.publisherPub,
-        created_at: rumor.created_at,
-        payload: parsedPayload,
-        d_tag: dTag,
-      });
-      if (items.length >= limit) break;
+      if (page.exhausted || page.entries.length === 0) break;
+      pageOpts = { afterCursor: page.entries[page.entries.length - 1]!.cursor };
     }
     items.sort((a, b) => a.created_at - b.created_at);
 
@@ -1265,10 +1228,98 @@ async function runInbox(
       since: since ?? null,
       limit,
       items,
+      next_since: lastConsumed?.receivedAt ?? since ?? null,
+      next_cursor: lastConsumed?.cursor ?? cursor ?? null,
+      has_more: hasMore,
     });
   } finally {
     callerPriv.fill(0);
   }
+}
+
+// Unwrap one stored gift-wrap into an inbox item for `slugFromPath`, or null
+// if it isn't ours / isn't for this audience / can't be decrypted.
+async function unwrapInboxItem(
+  entry: StoredWrap,
+  slugFromPath: string,
+  callerPriv: Uint8Array,
+  callerPub: string,
+  stub: DurableObjectStub<RelayPool>,
+): Promise<InboxItem | null> {
+  const w = entry.event;
+  let unwrapped;
+  try {
+    unwrapped = giftUnwrap(w, callerPriv);
+  } catch {
+    return null;
+  }
+  const rumor = unwrapped.rumor;
+  // Filter by audience slug from the path.
+  const aTag = rumor.tags.find((t) => t[0] === "a")?.[1];
+  if (!aTag) return null;
+  const parsedAddr = parseAudienceAddress(aTag);
+  if (!parsedAddr || parsedAddr.slug !== slugFromPath) return null;
+
+  const fa_epoch = Number(rumor.tags.find((t) => t[0] === "fa:epoch")?.[1] ?? NaN);
+  if (!Number.isSafeInteger(fa_epoch)) return null;
+
+  // Find the matching kind:30521 key-grant addressed to us for this audience+epoch.
+  const grantD = `${parsedAddr.slug}:${fa_epoch}:${callerPub}`;
+  // The grant could be signed by aud_id (founding) or any current member.
+  // Try aud_id first, then walk the declaration's member list.
+  let grantEvent: NostrEvent | null = await stub.getObject(30521, parsedAddr.pubkey, grantD);
+  if (!grantEvent) {
+    // Fall back: scan members of the current declaration as potential granters.
+    const decl = await stub.getObject(30520, parsedAddr.pubkey, parsedAddr.slug);
+    if (decl) {
+      const members = decl.tags.filter((t) => t[0] === "p").map((t) => t[1]!);
+      for (const m of members) {
+        const candidate = await stub.getObject(30521, m, grantD);
+        if (candidate) {
+          grantEvent = candidate;
+          break;
+        }
+      }
+    }
+  }
+  if (!grantEvent) return null;
+
+  let epochPrivBytes: Uint8Array;
+  try {
+    epochPrivBytes = nip44Decrypt(grantEvent.content, callerPriv, grantEvent.pubkey);
+  } catch {
+    return null;
+  }
+  if (epochPrivBytes.length !== 32) return null;
+
+  let plaintext: string;
+  try {
+    plaintext = nip44DecryptString(rumor.content, epochPrivBytes, unwrapped.publisherPub);
+  } catch {
+    // Defensive zero-fill the leaked epoch priv on this branch too.
+    epochPrivBytes.fill(0);
+    return null;
+  }
+  let parsedPayload: unknown = plaintext;
+  try {
+    parsedPayload = JSON.parse(plaintext);
+  } catch {
+    // payload wasn't JSON — leave as string.
+  }
+  epochPrivBytes.fill(0);
+
+  const dTag = rumor.tags.find((t) => t[0] === "d")?.[1];
+  return {
+    event_id: rumor.id,
+    received_at: entry.receivedAt,
+    kind: rumor.kind,
+    audience_slug: parsedAddr.slug,
+    epoch: fa_epoch,
+    publisher_pubkey: unwrapped.publisherPub,
+    created_at: rumor.created_at,
+    payload: parsedPayload,
+    d_tag: dTag,
+  };
 }
 
 // ─── router ─────────────────────────────────────────────────────────────────
@@ -1322,9 +1373,13 @@ export async function handleAudienceRequest(
     const slug = inboxMatch[1]!;
     const since = url.searchParams.get("since");
     const limit = url.searchParams.get("limit");
+    const cursor = url.searchParams.get("cursor");
     const sinceParsed = since ? Number(since) : undefined;
     const limitParsed = limit ? Math.min(Math.max(Number(limit) || 50, 1), 200) : 50;
-    return runInbox(slug, sinceParsed, limitParsed, claims, env);
+    if (cursor !== null && !WRAP_CURSOR.test(cursor)) {
+      return jsonError("bad_request", "cursor must be a next_cursor value returned by this endpoint", 400);
+    }
+    return runInbox(slug, sinceParsed, cursor ?? undefined, limitParsed, claims, env);
   }
 
   if (request.method !== "POST") {

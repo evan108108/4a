@@ -101,7 +101,7 @@ for await (const hook of subscribe(priv)) {
 
 **Not shown, worth adding for production:**
 - Reconnect with exponential backoff on stream close
-- Persist `wrapEventId` (or a `sinceUnix` cursor) so a restart doesn't miss deliveries in flight
+- Persist a `sinceUnix` cursor so a restart doesn't miss deliveries in flight: each `gift-wrap` SSE event's `received_at_ms` is the server-receive time (the axis `?since=<unixSeconds>` replays on; `since` is inclusive). Don't use the wrap's `created_at`, which NIP-59 backdates by up to a day. Events also carry an opaque `cursor` (`<receivedAt>:<wrapId>`).
 - Dedup on `wrapEventId` — the same wrap may replay if you reconnect within the retention window
 - The third-party signature verification — the whole point; every provider is different
 

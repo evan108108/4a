@@ -19,6 +19,7 @@ import { verifyJwt, type AuthClaims } from "./auth";
 import { handleCredibility, normalizePubkey } from "./credibility";
 import { runPublish, type Kind as PublishKind, type PublishEnv } from "./publish";
 import type { NostrEvent, QueryFilter, RelayPool } from "./relay-pool";
+import { WRAP_CURSOR } from "./lib/wrap-cursor";
 import {
   runScore,
   validateScoreBody,
@@ -548,7 +549,8 @@ const TOOLS: ToolDef[] = [
       type: "object",
       properties: {
         slug: { type: "string", description: "Audience slug (filters the inbox to this audience)" },
-        since: { type: "integer", description: "Unix timestamp; only return events with created_at >= since" },
+        since: { type: "integer", description: "Unix seconds on the server-receive axis; only return items whose gift-wrap was received at or after this time (inclusive). Pass the previous response's next_since and dedupe by event_id." },
+        cursor: { type: "string", description: "Opaque next_cursor from a previous response; resumes exactly after the last examined wrap (exclusive, no duplicates). Takes precedence over since." },
         limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
       },
       required: ["slug"],
@@ -740,11 +742,15 @@ async function runAudienceTool(
         const slug = typeof args.slug === "string" ? args.slug : "";
         if (!slug) throw rpcError(INVALID_PARAMS, "slug is required");
         const since = typeof args.since === "number" ? args.since : undefined;
+        const cursor = typeof args.cursor === "string" ? args.cursor : undefined;
+        if (cursor !== undefined && !WRAP_CURSOR.test(cursor)) {
+          throw rpcError(INVALID_PARAMS, "cursor must be a next_cursor value returned by audience_inbox");
+        }
         const limit =
           typeof args.limit === "number"
             ? Math.min(Math.max(args.limit, 1), 200)
             : 50;
-        resp = await __audienceRoutes.runInbox(slug, since, limit, session.claims, env);
+        resp = await __audienceRoutes.runInbox(slug, since, cursor, limit, session.claims, env);
         break;
       }
       default:

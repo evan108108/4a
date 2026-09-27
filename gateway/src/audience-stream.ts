@@ -5,6 +5,13 @@
 //
 //   hello                — emitted once after auth + membership + replay.
 //   gift-wrap            — kind:1059 wrap addressed to caller (#p:caller).
+//                          data: { wrap_event, received_at_ms, cursor }.
+//                          received_at_ms is the SERVER-RECEIVE time (the
+//                          axis since_ts replays on), not the wrap's
+//                          NIP-59-jittered created_at; cursor is the same
+//                          opaque "<receivedAt>:<wrapId>" as the inbox's
+//                          next_cursor. key-grant / declaration-updated keep
+//                          received_at_ms = created_at * 1000 (not jittered).
 //   key-grant            — kind:30521 grant addressed to caller (d-suffix).
 //   declaration-updated  — kind:30520 changes for the subscribed audience.
 //   epoch-rotated        — synthetic, when fa:epoch on the cached decl moves.
@@ -32,7 +39,7 @@ import {
   parseAudienceDeclaration,
   type AudienceDeclaration,
 } from "./audience-validator";
-import type { NostrEvent, RelayPool } from "./relay-pool";
+import type { NostrEvent, RelayPool, WrapPage } from "./relay-pool";
 
 const HEX64 = /^[0-9a-f]{64}$/i;
 
@@ -107,13 +114,16 @@ const REPLAY_LIMIT_MAX = 1000;
 const PUMP_MAX_ITERATIONS = 1800;
 const PUMP_MAX_DURATION_MS = 60 * 60 * 1000; // 1 hour
 
+// Max wrap pages drained per live-tail cycle when a page comes back full
+// (burst of more than livePollLimit wraps inside the overlap window).
+const LIVE_TAIL_MAX_PAGES = 10;
+
 type StubLike = {
   getObject(kind: number, pubkey: string, d: string): Promise<NostrEvent | null>;
-  listGiftWraps(
+  listGiftWrapPage(
     recipient: string,
-    sinceUnix?: number,
-    limit?: number,
-  ): Promise<NostrEvent[]>;
+    opts?: { sinceUnix?: number; afterCursor?: string; limit?: number },
+  ): Promise<WrapPage>;
   listKeyGrants(
     recipient: string,
     sinceUnix?: number,
@@ -129,12 +139,17 @@ function getStub(env: StreamEnv): StubLike {
 interface ReplayItem {
   kind: "gift-wrap" | "key-grant" | "declaration-updated";
   event: NostrEvent;
+  /** Receive-axis seconds: the server-receive time for gift-wraps (their
+   * created_at is NIP-59-jittered); created_at for grants/declarations. */
+  atSec: number;
+  /** Opaque gift-wrap cursor (same format as the inbox's next_cursor). */
+  cursor?: string;
 }
 
 function buildItemData(item: ReplayItem): Record<string, unknown> {
-  const receivedAtMs = item.event.created_at * 1000;
+  const receivedAtMs = item.atSec * 1000;
   if (item.kind === "gift-wrap") {
-    return { wrap_event: item.event, received_at_ms: receivedAtMs };
+    return { wrap_event: item.event, received_at_ms: receivedAtMs, cursor: item.cursor };
   }
   if (item.kind === "key-grant") {
     return { grant_event: item.event, received_at_ms: receivedAtMs };
@@ -271,17 +286,20 @@ export async function handleAudienceStreamRequest(
       if (sinceUnix !== undefined) {
         const items: ReplayItem[] = [];
 
-        const wraps = await stub.listGiftWraps(auth.pubkey, sinceUnix, replayLimit);
-        for (const w of wraps) {
+        const wrapPage = await stub.listGiftWrapPage(auth.pubkey, {
+          sinceUnix,
+          limit: replayLimit,
+        });
+        for (const w of wrapPage.entries) {
           // No created_at filter here: NIP-59 backdates created_at, but the
-          // DO's listGiftWraps already filtered by server-receive time.
-          items.push({ kind: "gift-wrap", event: w });
+          // DO's page read already filtered by server-receive time.
+          items.push({ kind: "gift-wrap", event: w.event, atSec: w.receivedAt, cursor: w.cursor });
         }
 
         const grants = await stub.listKeyGrants(auth.pubkey, sinceUnix, replayLimit);
         for (const g of grants) {
           if (g.created_at > sinceUnix) {
-            items.push({ kind: "key-grant", event: g });
+            items.push({ kind: "key-grant", event: g, atSec: g.created_at });
           }
         }
 
@@ -289,10 +307,12 @@ export async function handleAudienceStreamRequest(
         // it if its created_at exceeds since_ts (i.e. it changed after the
         // caller's last seen cursor).
         if (declEvent.created_at > sinceUnix) {
-          items.push({ kind: "declaration-updated", event: declEvent });
+          items.push({ kind: "declaration-updated", event: declEvent, atSec: declEvent.created_at });
         }
 
-        items.sort((a, b) => a.event.created_at - b.event.created_at);
+        // Order on the receive axis (a wrap's created_at is jittered up to
+        // ~2 days into the past, which used to scatter wraps before grants).
+        items.sort((a, b) => a.atSec - b.atSec);
 
         for (const item of items.slice(0, replayLimit)) {
           if (closed) return;
@@ -348,26 +368,33 @@ export async function handleAudienceStreamRequest(
         }
         iterations++;
 
-        const newWraps = await stub.listGiftWraps(
-          auth.pubkey,
-          cursorUnix,
-          config.livePollLimit,
-        );
-        for (const w of newWraps) {
-          if (closed) return;
-          // Don't filter by `w.created_at` — gift-wrap created_at is
-          // NIP-59-jittered (backdated up to ~2 days for anti-correlation),
-          // so a wallclock cursor comparison silently drops legitimate new
-          // wraps. The DO's listGiftWraps already filters by server-receive
-          // time; seenIds dedupes any overlap from cursor slack.
-          if (seenIds.has(w.id)) continue;
-          seenIds.add(w.id);
-          const ok = await emit(
-            "gift-wrap",
-            { wrap_event: w, received_at_ms: w.created_at * 1000 },
-            w.id,
-          );
-          if (!ok) return;
+        // Drain wraps received since the overlap cursor. If a page comes
+        // back full (a burst larger than livePollLimit inside the window),
+        // keep paging by exact cursor so the tail doesn't re-read the same
+        // first page every cycle and miss the rest.
+        let pageOpts: { sinceUnix?: number; afterCursor?: string } = { sinceUnix: cursorUnix };
+        for (let p = 0; p < LIVE_TAIL_MAX_PAGES; p++) {
+          const page = await stub.listGiftWrapPage(auth.pubkey, {
+            ...pageOpts,
+            limit: config.livePollLimit,
+          });
+          for (const w of page.entries) {
+            if (closed) return;
+            // Don't filter by `created_at` — gift-wrap created_at is
+            // NIP-59-jittered (backdated up to ~2 days for anti-correlation).
+            // The page read filters by server-receive time; seenIds dedupes
+            // any overlap from cursor slack.
+            if (seenIds.has(w.event.id)) continue;
+            seenIds.add(w.event.id);
+            const ok = await emit(
+              "gift-wrap",
+              { wrap_event: w.event, received_at_ms: w.receivedAt * 1000, cursor: w.cursor },
+              w.event.id,
+            );
+            if (!ok) return;
+          }
+          if (page.exhausted || page.entries.length === 0) break;
+          pageOpts = { afterCursor: page.entries[page.entries.length - 1]!.cursor };
         }
 
         const newGrants = await stub.listKeyGrants(

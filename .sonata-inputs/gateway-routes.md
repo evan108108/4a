@@ -61,7 +61,7 @@ Handled by `handleApiRequest` in `gateway/src/api.ts`. Filter parameters: `kind`
 | POST | `/v0/audience/invite` | Mint an invite. Returns `{ four_a_url, https_url, invite_pub, expires_at }`. |
 | POST | `/v0/audience/grant` | Issue a `kind:30521` key-grant directly to a known recipient (handle or npub path). |
 | POST | `/v0/audience/claim` | Process a `kind:30522` audience claim and issue the matching key-grant. |
-| GET | `/v0/audience/inbox` | Read decrypted audience messages. Supports `since`, `limit`. |
+| GET | `/v0/audience/:slug/inbox` | Read decrypted audience messages. Supports `since` (inclusive, server-receive seconds), `cursor` (exclusive, from `next_cursor`), `limit`. Items carry `received_at`; the response adds `next_since`, `next_cursor`, `has_more`. |
 | GET | `/v0/audience/:slug/health` | Per-audience liveness. |
 
 ## MCP (`mcp.4a4.ai`)

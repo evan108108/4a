@@ -7,7 +7,7 @@
 // check, no key-grants, no epoch tracking. Authorization is simply "the
 // caller IS the recipient": NIP-98 auth where auth.pubkey === path pubkey.
 //
-// Reads ONLY the hook-wrap prefix (relay-pool listHookWraps), so audience
+// Reads ONLY the hook-wrap prefix (relay-pool listHookWrapPage), so audience
 // traffic addressed to the same pubkey never flows here and the subscribing
 // plugin doesn't unwrap wraps it would discard.
 //
@@ -21,7 +21,7 @@
 // time >= since (server-receive, NOT the NIP-59-jittered created_at).
 
 import { verifyNip98 } from "./lib/nip98";
-import type { NostrEvent, RelayPool } from "./relay-pool";
+import type { RelayPool, StoredWrap } from "./relay-pool";
 
 const HEX64 = /^[0-9a-f]{64}$/i;
 
@@ -57,6 +57,9 @@ export interface InboxStreamConfig {
   /** Max wraps fetched per live poll. */
   livePollLimit: number;
 }
+
+// Max wrap pages drained per live-tail cycle when a page comes back full.
+const LIVE_TAIL_MAX_PAGES = 10;
 
 const DEFAULT_CONFIG: InboxStreamConfig = {
   livePollMs: 2_000,
@@ -157,16 +160,24 @@ export async function handleInboxStream(
     return safeWrite(s);
   }
 
-  function emitWrap(w: NostrEvent): Promise<boolean> {
-    return emit("gift-wrap", { wrap_event: w, received_at_ms: w.created_at * 1000 }, w.id);
+  // received_at_ms is the SERVER-RECEIVE time (the axis ?since= replays
+  // on), not the wrap's NIP-59-jittered created_at, which is backdated up to
+  // a day and made reconnect cursors lag. cursor is the opaque
+  // "<receivedAt>:<wrapId>" resume point.
+  function emitWrap(w: StoredWrap): Promise<boolean> {
+    return emit(
+      "gift-wrap",
+      { wrap_event: w.event, received_at_ms: w.receivedAt * 1000, cursor: w.cursor },
+      w.event.id,
+    );
   }
 
   (async () => {
     try {
       // ── Replay ────────────────────────────────────────────────────────
       if (sinceUnix !== undefined) {
-        const wraps = await stub.listHookWraps(caller, sinceUnix, replayLimit);
-        for (const w of wraps) {
+        const page = await stub.listHookWrapPage(caller, { sinceUnix, limit: replayLimit });
+        for (const w of page.entries) {
           if (closed) return;
           const ok = await emitWrap(w);
           if (!ok) return;
@@ -202,13 +213,21 @@ export async function handleInboxStream(
         }
         iterations++;
 
-        const newWraps = await stub.listHookWraps(caller, cursorUnix, config.livePollLimit);
-        for (const w of newWraps) {
-          if (closed) return;
-          if (seenIds.has(w.id)) continue;
-          seenIds.add(w.id);
-          const ok = await emitWrap(w);
-          if (!ok) return;
+        // Drain everything received since the overlap cursor; if a page is
+        // full, keep paging by exact cursor (bounded) instead of re-reading
+        // the same first page every cycle.
+        let pageOpts: { sinceUnix?: number; afterCursor?: string } = { sinceUnix: cursorUnix };
+        for (let p = 0; p < LIVE_TAIL_MAX_PAGES; p++) {
+          const page = await stub.listHookWrapPage(caller, { ...pageOpts, limit: config.livePollLimit });
+          for (const w of page.entries) {
+            if (closed) return;
+            if (seenIds.has(w.event.id)) continue;
+            seenIds.add(w.event.id);
+            const ok = await emitWrap(w);
+            if (!ok) return;
+          }
+          if (page.exhausted || page.entries.length === 0) break;
+          pageOpts = { afterCursor: page.entries[page.entries.length - 1]!.cursor };
         }
 
         if (Date.now() - lastKeepalive >= config.keepaliveMs) {

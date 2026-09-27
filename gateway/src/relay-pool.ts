@@ -19,6 +19,7 @@
 // missed events.
 
 import { DurableObject } from "cloudflare:workers";
+import { WRAP_CURSOR } from "./lib/wrap-cursor";
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { blake3ContentTag } from "./lib/blake3-tag";
@@ -54,8 +55,6 @@ const GIFT_WRAP_PREFIX = "giftwrap:";
 // Upper bound on keys read by one wrap-page storage.list (covers the SSE
 // replay max of 1000). Callers page with cursors beyond this.
 const WRAP_PAGE_MAX = 1000;
-// Opaque wrap cursor: "<12-digit receive second>:<wrap id>".
-const WRAP_CURSOR = /^\d{12}:[0-9a-f]{64}$/;
 
 /** A stored wrap plus its authoritative receive time and resume cursor. */
 export interface StoredWrap {
@@ -434,8 +433,8 @@ export class RelayPool extends DurableObject<unknown> {
     const receivedAtSec = Math.floor(Date.now() / 1000);
     const ts = String(receivedAtSec).padStart(12, "0");
     const key = `${GIFT_WRAP_PREFIX}${recipient.toLowerCase()}:${ts}:${event.id}`;
-    // Persist receivedAt alongside the event so listGiftWraps can filter
-    // without parsing the storage key on every read.
+    // Persist receivedAt alongside the event for debugging; reads use the
+    // key timestamp (see listWrapPage), which also covers legacy wraps.
     const stored = { ...event, _receivedAt: receivedAtSec } as NostrEvent & { _receivedAt: number };
     await this.ctx.storage.put(key, stored);
     console.log("[storeGiftWrap] stored", {
@@ -483,6 +482,19 @@ export class RelayPool extends DurableObject<unknown> {
       entries.push({ event: clean as NostrEvent, receivedAt: Number(cursor.slice(0, 12)), cursor });
     }
     return { entries, exhausted: list.size < limit };
+  }
+
+  /**
+   * Page through cached gift-wraps addressed to `recipient` in receive order,
+   * exposing each wrap's receive time and opaque resume cursor. Used by
+   * /audience/:slug/inbox (next_since / next_cursor) and the SSE stream.
+   */
+  async listGiftWrapPage(
+    recipient: string,
+    opts: { sinceUnix?: number; afterCursor?: string; limit?: number } = {},
+  ): Promise<WrapPage> {
+    if (!/^[0-9a-f]{64}$/i.test(recipient)) return { entries: [], exhausted: true };
+    return this.listWrapPage(`${GIFT_WRAP_PREFIX}${recipient.toLowerCase()}:`, opts);
   }
 
   /**
@@ -564,7 +576,7 @@ export class RelayPool extends DurableObject<unknown> {
   /**
    * Fetch cached hook wraps addressed to `recipient`, oldest-first, filtered
    * by server-receive time (`sinceUnix` inclusive-exclusive semantics match
-   * listGiftWraps). Reads only HOOK_WRAP_PREFIX — audience traffic never
+   * listGiftWraps; one bounded range read via listHookWrapPage). Reads only HOOK_WRAP_PREFIX — audience traffic never
    * appears here.
    */
   async listHookWraps(
@@ -572,15 +584,23 @@ export class RelayPool extends DurableObject<unknown> {
     sinceUnix?: number,
     limit = 100,
   ): Promise<NostrEvent[]> {
-    if (!/^[0-9a-f]{64}$/i.test(recipient)) return [];
+    const page = await this.listHookWrapPage(recipient, { sinceUnix, limit });
+    return page.entries.map((e) => e.event);
+  }
+
+  /**
+   * Page through hook wraps for `recipient` in receive order, exposing each
+   * wrap's receive time and resume cursor (the /v0/inbox SSE stream uses it).
+   */
+  async listHookWrapPage(
+    recipient: string,
+    opts: { sinceUnix?: number; afterCursor?: string; limit?: number } = {},
+  ): Promise<WrapPage> {
+    if (!/^[0-9a-f]{64}$/i.test(recipient)) return { entries: [], exhausted: true };
     // Read-path prune: an active subscriber self-cleans even when the
     // recipient isn't currently receiving writes.
     await this.pruneExpiredHookWraps(recipient);
-    const page = await this.listWrapPage(`${HOOK_WRAP_PREFIX}${recipient.toLowerCase()}:`, {
-      sinceUnix,
-      limit,
-    });
-    return page.entries.map((e) => e.event);
+    return this.listWrapPage(`${HOOK_WRAP_PREFIX}${recipient.toLowerCase()}:`, opts);
   }
 
   /**

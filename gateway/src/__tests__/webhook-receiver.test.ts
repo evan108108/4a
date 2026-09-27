@@ -33,7 +33,7 @@ import {
   type HookEnv,
 } from "../webhook-receiver";
 import { handleInboxStream, type InboxStreamEnv } from "../inbox-stream";
-import type { NostrEvent } from "../relay-pool";
+import type { NostrEvent, WrapPage } from "../relay-pool";
 
 // ── Test keys ───────────────────────────────────────────────────────────────
 
@@ -49,23 +49,40 @@ const OTHER_PRIV = hexToBytes(
 // ── Fake stub ───────────────────────────────────────────────────────────────
 
 interface FakeStub {
-  hookWraps: { event: NostrEvent; recipient: string }[];
+  hookWraps: { event: NostrEvent; recipient: string; receivedAt: number }[];
   storeHookWrap: (event: NostrEvent, recipient: string) => Promise<{ ok: boolean; reason?: string }>;
-  listHookWraps: (recipient: string, sinceUnix?: number, limit?: number) => Promise<NostrEvent[]>;
+  listHookWrapPage: (
+    recipient: string,
+    opts?: { sinceUnix?: number; afterCursor?: string; limit?: number },
+  ) => Promise<WrapPage>;
 }
 
 function makeFakeStub(): FakeStub {
   const stub: FakeStub = {
     hookWraps: [],
     async storeHookWrap(event, recipient) {
-      stub.hookWraps.push({ event, recipient });
+      // Server-receive time, like RelayPool.storeHookWrap (NOT created_at,
+      // which NIP-59 backdates).
+      stub.hookWraps.push({ event, recipient, receivedAt: Math.floor(Date.now() / 1000) });
       return { ok: true };
     },
-    async listHookWraps(recipient, _sinceUnix, limit = 100) {
-      return stub.hookWraps
+    async listHookWrapPage(recipient, opts = {}) {
+      const limit = opts.limit ?? 100;
+      const all = stub.hookWraps
         .filter((w) => w.recipient === recipient)
-        .map((w) => w.event)
-        .slice(0, limit);
+        .map((w) => ({
+          event: w.event,
+          receivedAt: w.receivedAt,
+          cursor: `${String(w.receivedAt).padStart(12, "0")}:${w.event.id}`,
+        }))
+        .sort((a, b) => (a.cursor < b.cursor ? -1 : a.cursor > b.cursor ? 1 : 0))
+        .filter((e) =>
+          opts.afterCursor !== undefined
+            ? e.cursor > opts.afterCursor
+            : opts.sinceUnix === undefined || e.receivedAt >= opts.sinceUnix,
+        );
+      const entries = all.slice(0, limit);
+      return { entries, exhausted: entries.length < limit };
     },
   };
   return stub;
@@ -302,5 +319,43 @@ describe("handleInboxStream", () => {
     await reader.cancel();
     expect(text).toContain("event: hello");
     expect(text).toContain(`"pubkey":"${RECIPIENT_PUB.toLowerCase()}"`);
+  });
+  it("replays hook wraps with received_at_ms = server-receive time (not the jittered created_at) and a cursor", async () => {
+    const stub = makeFakeStub();
+    const now = Math.floor(Date.now() / 1000);
+    const wrapEvent = {
+      id: "c".repeat(64),
+      pubkey: "d".repeat(64),
+      created_at: now - 86_400, // NIP-59 backdate
+      kind: 1059,
+      tags: [["p", RECIPIENT_PUB.toLowerCase()]],
+      content: "x",
+      sig: "e".repeat(128),
+    } as NostrEvent;
+    stub.hookWraps.push({ event: wrapEvent, recipient: RECIPIENT_PUB.toLowerCase(), receivedAt: now - 5 });
+    const url = `${streamUrl}?since=${now - 60}`;
+    const req = new Request(url, {
+      headers: { authorization: makeNip98Header(url, "GET", RECIPIENT_PRIV) },
+    });
+    const res = await handleInboxStream(req, RECIPIENT_PUB, makeEnv(stub), {
+      livePollMs: 20,
+      keepaliveMs: 10_000,
+      livePollLimit: 100,
+    });
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    const deadline = Date.now() + 2_000;
+    while (!text.includes("event: hello") && Date.now() < deadline) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+    }
+    await reader.cancel();
+    const line = text.split("\n").find((l) => l.startsWith("data:") && l.includes("wrap_event"));
+    expect(line).toBeDefined();
+    const data = JSON.parse(line!.slice(5)) as { received_at_ms: number; cursor: string };
+    expect(data.received_at_ms).toBe((now - 5) * 1000);
+    expect(data.cursor).toBe(`${String(now - 5).padStart(12, "0")}:${wrapEvent.id}`);
   });
 });

@@ -14,7 +14,7 @@
 //   - Keepalive: ":" SSE comment after the configured idle threshold.
 //
 // We mock the relay-pool stub as a plain object exposing the three methods
-// the handler calls — `getObject`, `listGiftWraps`, `listKeyGrants` — so the
+// the handler calls — `getObject`, `listGiftWrapPage`, `listKeyGrants` — so the
 // tests don't need a Workers/DO test harness. The router→handler dispatch
 // is exercised via a direct call to `handleAudienceStreamRequest`.
 
@@ -31,7 +31,7 @@ import {
   type StreamConfig,
   type StreamEnv,
 } from "../audience-stream";
-import type { NostrEvent } from "../relay-pool";
+import type { NostrEvent, WrapPage } from "../relay-pool";
 import type { SignedEvent } from "../kms";
 
 // ── Test keys ───────────────────────────────────────────────────────────────
@@ -89,17 +89,18 @@ function makeNip98Header(opts: {
 interface FakeStub {
   declaration: NostrEvent | null;
   giftWraps: NostrEvent[];
+  /** Server-receive seconds per wrap id; defaults to the wrap's created_at. */
+  wrapReceivedAt: Map<string, number>;
   keyGrants: NostrEvent[];
   getObject: (
     kind: number,
     pubkey: string,
     d: string,
   ) => Promise<NostrEvent | null>;
-  listGiftWraps: (
+  listGiftWrapPage: (
     recipient: string,
-    sinceUnix?: number,
-    limit?: number,
-  ) => Promise<NostrEvent[]>;
+    opts?: { sinceUnix?: number; afterCursor?: string; limit?: number },
+  ) => Promise<WrapPage>;
   listKeyGrants: (
     recipient: string,
     sinceUnix?: number,
@@ -115,18 +116,29 @@ function makeFakeStub(initial: {
   const stub: FakeStub = {
     declaration: initial.declaration,
     giftWraps: initial.giftWraps ?? [],
+    wrapReceivedAt: new Map(),
     keyGrants: initial.keyGrants ?? [],
     async getObject(kind, _pubkey, _d) {
       if (kind === 30520) return stub.declaration;
       return null;
     },
-    async listGiftWraps(_recipient, sinceUnix, limit = 100) {
-      const out = stub.giftWraps
-        .filter((w) =>
-          sinceUnix === undefined ? true : w.created_at > sinceUnix,
-        )
-        .sort((a, b) => a.created_at - b.created_at);
-      return out.slice(0, limit);
+    // Mirrors RelayPool.listWrapPage: (receivedAt, id) key order, since
+    // inclusive, afterCursor exclusive, exhausted when short of limit.
+    async listGiftWrapPage(_recipient, opts = {}) {
+      const limit = opts.limit ?? 100;
+      const all = stub.giftWraps
+        .map((w) => {
+          const receivedAt = stub.wrapReceivedAt.get(w.id) ?? w.created_at;
+          return { event: w, receivedAt, cursor: `${String(receivedAt).padStart(12, "0")}:${w.id}` };
+        })
+        .sort((a, b) => (a.cursor < b.cursor ? -1 : a.cursor > b.cursor ? 1 : 0));
+      const filtered = all.filter((e) =>
+        opts.afterCursor !== undefined
+          ? e.cursor > opts.afterCursor
+          : opts.sinceUnix === undefined || e.receivedAt >= opts.sinceUnix,
+      );
+      const entries = filtered.slice(0, limit);
+      return { entries, exhausted: entries.length < limit };
     },
     async listKeyGrants(_recipient, sinceUnix, limit = 100) {
       const out = stub.keyGrants
@@ -693,6 +705,65 @@ describe("audience stream — live tail", () => {
     const declUpdated = frames.find((f) => f.event === "declaration-updated")!;
     const declData = declUpdated.data as { declaration_event: NostrEvent };
     expect(declData.declaration_event.kind).toBe(30520);
+  });
+});
+
+describe("audience stream — receive-time axis (NIP-59 jitter)", () => {
+  function authedRequest(url: string): Request {
+    return new Request(url, {
+      method: "GET",
+      headers: { Authorization: makeNip98Header({ url, method: "GET", priv: MEMBER_PRIV }) },
+    });
+  }
+
+  it("replays a wrap by its receive time and reports received_at_ms = receive time (not the jittered created_at), with a cursor", async () => {
+    const base = nowSec() - 1000;
+    const grant = makeFakeKeyGrant({ recipient: MEMBER_PUB, epoch: 1, createdAt: base + 1 });
+    // created_at backdated ~2 days, as NIP-59 wraps are; received at base+3.
+    const wrap = makeGiftWrap({ createdAt: base - 2 * 86_400 });
+    const stub = makeFakeStub({
+      declaration: makeDeclaration({ members: [MEMBER_PUB], createdAt: base - 50_000 }),
+      giftWraps: [wrap],
+      keyGrants: [grant],
+    });
+    stub.wrapReceivedAt.set(wrap.id, base + 3);
+
+    const url = `${URL_BASE}&since_ts=${(base - 10) * 1000}`;
+    const res = await handleAudienceStreamRequest(authedRequest(url), SLUG, makeEnv(stub), FAST_CONFIG);
+    const frames = await readSseFrames(res, {
+      until: (fs) => fs.some((f) => f.event === "hello"),
+      timeoutMs: 1000,
+    });
+    const replay = frames.filter((f) => f.event === "gift-wrap" || f.event === "key-grant");
+    // Receive-axis order: grant (base+1) before the wrap (received base+3).
+    expect(replay.map((f) => f.event)).toEqual(["key-grant", "gift-wrap"]);
+    const data = replay[1]!.data as { wrap_event: NostrEvent; received_at_ms: number; cursor: string };
+    expect(data.wrap_event.id).toBe(wrap.id);
+    expect(data.received_at_ms).toBe((base + 3) * 1000);
+    expect(data.cursor).toBe(`${String(base + 3).padStart(12, "0")}:${wrap.id}`);
+  });
+
+  it("live tail drains a burst larger than livePollLimit in one cycle and reports real receive times", async () => {
+    const stub = makeFakeStub({ declaration: makeDeclaration({ members: [MEMBER_PUB] }) });
+    const res = await handleAudienceStreamRequest(authedRequest(URL_BASE), SLUG, makeEnv(stub), FAST_CONFIG);
+    const receivedAt = nowSec();
+    setTimeout(() => {
+      for (let i = 0; i < 250; i++) {
+        const w = makeGiftWrap({ createdAt: receivedAt - 86_400 });
+        stub.giftWraps.push(w);
+        stub.wrapReceivedAt.set(w.id, receivedAt);
+      }
+    }, 50);
+    const frames = await readSseFrames(res, {
+      until: (fs) => fs.filter((f) => f.event === "gift-wrap").length >= 250,
+      timeoutMs: 1500,
+    });
+    const wraps = frames.filter((f) => f.event === "gift-wrap");
+    expect(wraps).toHaveLength(250);
+    expect(new Set(wraps.map((f) => f.id)).size).toBe(250);
+    for (const f of wraps) {
+      expect((f.data as { received_at_ms: number }).received_at_ms).toBe(receivedAt * 1000);
+    }
   });
 });
 
