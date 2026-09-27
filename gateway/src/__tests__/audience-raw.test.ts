@@ -39,12 +39,21 @@ const { defaultFanOut, defaultFanOutBatch } = vi.hoisted(() => {
   const defaultFanOutBatch = (events: readonly { id: string }[]) => Promise.all(events.map(defaultFanOut));
   return { defaultFanOut, defaultFanOutBatch };
 });
-vi.mock("../publish", () => ({
-  fanOut: vi.fn(defaultFanOut),
-  fanOutBatch: vi.fn(defaultFanOutBatch),
-  enqueueRelayRetries: vi.fn(async () => {}),
-  rateLimitCheck: vi.fn(() => ({ ok: true as const })),
-}));
+vi.mock("../publish", () => {
+  const fanOutBatch = vi.fn(defaultFanOutBatch);
+  return {
+    fanOut: vi.fn(defaultFanOut),
+    fanOutBatch,
+    // The detailed variant (used by deliverMemberWraps) goes through the
+    // mocked fanOutBatch, so tests can drive and inspect both through it.
+    fanOutBatchDetailed: vi.fn(async (events: readonly { id: string }[]) => ({
+      acks: await fanOutBatch(events as never),
+      relays: [],
+    })),
+    enqueueRelayRetries: vi.fn(async () => {}),
+    rateLimitCheck: vi.fn(() => ({ ok: true as const })),
+  };
+});
 
 import { handleAudienceRawRequest, type AudienceRawEnv } from "../audience-raw";
 import { enqueueRelayRetries, fanOut, fanOutBatch, type RelayResult } from "../publish";
@@ -1164,6 +1173,26 @@ describe("handleAudienceRawRequest — batched relay fan-out", () => {
     expect(body.gift_wraps.map((g) => g.event_id)).toEqual(wraps.map((w) => w.id));
     expect(body.gift_wraps.map((g) => g.recipient)).toEqual(recipients);
     expect(body.gift_wraps.map((g) => g.relay_acks)).toEqual(wraps.map((w) => acceptedAcks(w.id)));
+  });
+
+  it("publish-wraps: logs ONE structured timing line per request", async () => {
+    const { env, stub } = makeStubEnv();
+    const founder = makeKeypair();
+    const room = seedRoom(stub, "timing", [founder.pub]);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const wraps = [wrapFor(founder.pub), wrapFor(founder.pub)];
+    const { status } = await publishWraps(env, founder.priv, room.address, wraps);
+    expect(status).toBe(200);
+    const lines = log.mock.calls
+      .map((c) => (typeof c[0] === "string" ? c[0] : ""))
+      .filter((l) => l.includes("audience.wraps.timing"));
+    log.mockRestore();
+    expect(lines).toHaveLength(1);
+    const t = JSON.parse(lines[0]!) as Record<string, unknown>;
+    expect(t).toMatchObject({ msg: "audience.wraps.timing", route: "audience/raw/publish-wraps", slug: "timing", wraps: 2, relays: [] });
+    for (const phase of ["total_ms", "lookup_ms", "validate_ms", "cache_ms", "fanout_ms", "retry_ms"]) {
+      expect(typeof t[phase]).toBe("number");
+    }
   });
 
   it("publish-wraps: caches every wrap before the relay batch, even if no relay accepts, and queues retries per wrap", async () => {

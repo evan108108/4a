@@ -80,7 +80,15 @@ import {
 import type { NostrEvent, RelayPool, StoredWrap } from "./relay-pool";
 import { WRAP_CURSOR } from "./lib/wrap-cursor";
 import { mapWithConcurrency } from "./lib/concurrency";
-import { enqueueRelayRetries, fanOut, fanOutBatch, rateLimitCheck, type RelayResult } from "./publish";
+import {
+  enqueueRelayRetries,
+  fanOut,
+  fanOutBatch,
+  fanOutBatchDetailed,
+  rateLimitCheck,
+  type RelayBatchTiming,
+  type RelayResult,
+} from "./publish";
 
 export type AudienceEnv = AuthEnv & KmsEnv & {
   RELAY_POOL: DurableObjectNamespace<RelayPool>;
@@ -207,9 +215,18 @@ export interface MemberWrapResult {
 // socket per relay), so this only bounds DO traffic.
 export const DO_CALL_CONCURRENCY = 8;
 
+// Where one wrap delivery's time went; logged once per publish request.
+export interface WrapDeliveryTiming {
+  wraps: number;
+  cache_ms: number;
+  fanout_ms: number;
+  retry_ms: number;
+  relays: RelayBatchTiming[];
+}
+
 // Deliver one gift-wrap per member. Every wrap is cached in the relay-pool DO
 // first (so the inbox/stream never waits on relays), then all of them go to
-// the relays in one batch (one socket per relay), and each wrap's
+// the relays in one paced batch (one socket per relay), and each wrap's
 // transiently-failed relays go to the retry queue. Results keep the input
 // (member) order. Shared with /v0/audience/raw/publish-wraps; exported for
 // tests.
@@ -217,7 +234,8 @@ export async function deliverMemberWraps(
   memberWraps: readonly MemberWrap[],
   stub: Pick<DurableObjectStub<RelayPool>, "storeGiftWrap">,
   env: Pick<AudienceEnv, "RELAY_POOL">,
-): Promise<MemberWrapResult[]> {
+): Promise<{ results: MemberWrapResult[]; timing: WrapDeliveryTiming }> {
+  const t0 = Date.now();
   await mapWithConcurrency(memberWraps, DO_CALL_CONCURRENCY, ({ recipient, wrapSigned }) =>
     stub.storeGiftWrap(wrapSigned, recipient).catch((err: unknown) => {
       console.error("[audience publish] storeGiftWrap threw", {
@@ -227,15 +245,49 @@ export async function deliverMemberWraps(
       });
     }),
   );
-  const acks = await fanOutBatch(memberWraps.map((m) => m.wrapSigned));
+  const t1 = Date.now();
+  const { acks, relays } = await fanOutBatchDetailed(memberWraps.map((m) => m.wrapSigned));
+  const t2 = Date.now();
   await mapWithConcurrency(memberWraps, DO_CALL_CONCURRENCY, ({ wrapSigned }, i) =>
     enqueueRelayRetries(env, wrapSigned, acks[i]!),
   );
-  return memberWraps.map(({ recipient, wrapSigned }, i) => ({
-    recipient,
-    event_id: wrapSigned.id,
-    acks: acks[i]!,
-  }));
+  const t3 = Date.now();
+  return {
+    results: memberWraps.map(({ recipient, wrapSigned }, i) => ({
+      recipient,
+      event_id: wrapSigned.id,
+      acks: acks[i]!,
+    })),
+    timing: {
+      wraps: memberWraps.length,
+      cache_ms: t1 - t0,
+      fanout_ms: t2 - t1,
+      retry_ms: t3 - t2,
+      relays,
+    },
+  };
+}
+
+// One structured line per wrap-publishing request, so a slow publish can be
+// read straight off `wrangler tail`: the route's own phases, then the
+// delivery (cache writes, relay batch per relay, retry hand-off).
+export function logWrapPublishTiming(
+  route: string,
+  slug: string,
+  startedAt: number,
+  phases: Record<string, number>,
+  delivery: WrapDeliveryTiming,
+): void {
+  console.log(
+    JSON.stringify({
+      msg: "audience.wraps.timing",
+      route,
+      slug,
+      total_ms: Date.now() - startedAt,
+      ...phases,
+      ...delivery,
+    }),
+  );
 }
 
 async function publishAndStore(
@@ -1140,6 +1192,7 @@ async function runAudiencePublish(
   claims: AuthClaims,
   env: AudienceEnv,
 ): Promise<Response> {
+  const startedAt = Date.now();
   const { audIdPub, slug } = requireAddress(body.audience_address, "audience_address");
   const closed = rejectIfClosedGuard(
     await loadAudienceStatusGuard(audIdPub, slug, env),
@@ -1150,6 +1203,7 @@ async function runAudiencePublish(
   if (!cached) {
     return jsonError("not_found", "audience declaration not found in relay cache", 404);
   }
+  const lookupMs = Date.now() - startedAt;
   if (cached.decl.epochPub !== body.aud_epoch_pub) {
     return jsonError(
       "bad_request",
@@ -1160,10 +1214,13 @@ async function runAudiencePublish(
 
   // Caller's identity = publisher.
   const identity = { provider: claims.provider, oauth_id: claims.oauth_id };
+  const deriveStarted = Date.now();
   const { secretKey: publisherPriv, publicKey: publisherPub } = await deriveNostrKey(
     identity,
     env,
   );
+  const deriveMs = Date.now() - deriveStarted;
+  const buildStarted = Date.now();
   if (!cached.decl.members.some((m) => m.toLowerCase() === publisherPub.toLowerCase())) {
     publisherPriv.fill(0);
     return jsonError("forbidden", "publisher is not a current member of the audience", 403);
@@ -1187,13 +1244,12 @@ async function runAudiencePublish(
   const rumor = signEventWithRawKey(rumorTpl, publisherPriv);
 
   // 3. Gift-wrap the rumor for every member up front (synchronous, needs
-  //    publisherPriv), then handle the members in parallel. For each one:
-  //    cache the wrap in the relay-pool DO under the recipient's giftwrap
-  //    index FIRST, so the same-instance inbox/stream sees it without waiting
-  //    on relays; then fan it out and hand slow relays to the retry queue.
-  //    The wrap was always cached regardless of relay acceptance, so only the
-  //    order changed. Handling members one at a time (before 2026-09-27) made
-  //    the relay fan-outs add together.
+  //    publisherPriv), then deliver them (deliverMemberWraps): every wrap is
+  //    cached in the relay-pool DO under the recipient's giftwrap index FIRST,
+  //    so the same-instance inbox/stream sees it without waiting on relays;
+  //    then all wraps go out in one paced batch (one socket per relay) and
+  //    slow relays go to the retry queue. Handling members one at a time
+  //    (before 2026-09-27) made the relay fan-outs add together.
   const id = env.RELAY_POOL.idFromName("main");
   const stub = env.RELAY_POOL.get(id);
   const memberWraps = cached.decl.members.map((recipient) => ({
@@ -1201,8 +1257,14 @@ async function runAudiencePublish(
     wrapSigned: giftWrapEvent(rumor, publisherPriv, recipient) as SignedEvent,
   }));
   publisherPriv.fill(0);
+  const buildMs = Date.now() - buildStarted;
 
-  const wraps = await deliverMemberWraps(memberWraps, stub, env);
+  const { results: wraps, timing } = await deliverMemberWraps(memberWraps, stub, env);
+  logWrapPublishTiming("audience/publish", slug, startedAt, {
+    lookup_ms: lookupMs,
+    derive_ms: deriveMs,
+    build_ms: buildMs,
+  }, timing);
 
   return jsonResponse({
     ok: true,

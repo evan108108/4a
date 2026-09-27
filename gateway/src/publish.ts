@@ -32,7 +32,14 @@ import {
   type GrantRevokeBody,
   type OrgBody,
 } from "./org-builder";
-import { classifyRejection, RELAYS, type RelayPool } from "./relay-pool";
+import {
+  classifyRejection,
+  isRelayThrottle,
+  nextCooldown,
+  RELAYS,
+  type RelayCooldown,
+  type RelayPool,
+} from "./relay-pool";
 import { connectRelaySocket } from "./lib/relay-connect";
 
 export type PublishEnv = AuthEnv & KmsEnv & {
@@ -49,18 +56,40 @@ const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 // DO retry queue. See lib/relay-connect.ts for why the connect bound exists.
 export const RELAY_CONNECT_TIMEOUT_MS = 3000;
 export const RELAY_OK_TIMEOUT_MS = 3000;
-// A batch gets the single-event OK window plus RELAY_BATCH_OK_PER_EVENT_MS per
-// extra event, capped at RELAY_BATCH_OK_MAX_MS: relays answer a burst of
-// EVENTs in order, but not instantly.
+// Pacing inside one relay socket. relay.damus.io bans the gateway's egress
+// ("banned: too many rate-limit violations") when a batch arrives as one
+// burst, so a batch keeps at most RELAY_MAX_UNACKED EVENT frames unanswered
+// per relay and spaces sends at least RELAY_EVENT_GAP_MS apart.
+export const RELAY_MAX_UNACKED = 5;
+export const RELAY_EVENT_GAP_MS = 50;
+// A batch gets the single-event OK window plus, per extra event, its pacing
+// gap and RELAY_BATCH_OK_PER_EVENT_MS for the relay to answer, capped at
+// RELAY_BATCH_OK_MAX_MS. One event keeps exactly RELAY_OK_TIMEOUT_MS.
 export const RELAY_BATCH_OK_PER_EVENT_MS = 100;
-export const RELAY_BATCH_OK_MAX_MS = 10_000;
+export const RELAY_BATCH_OK_MAX_MS = 12_000;
 
 export function batchOkWindowMs(events: number): number {
   return Math.min(
     RELAY_BATCH_OK_MAX_MS,
-    RELAY_OK_TIMEOUT_MS + RELAY_BATCH_OK_PER_EVENT_MS * Math.max(0, events - 1),
+    RELAY_OK_TIMEOUT_MS +
+      (RELAY_EVENT_GAP_MS + RELAY_BATCH_OK_PER_EVENT_MS) * Math.max(0, events - 1),
   );
 }
+
+// Relays that said "rate-limited"/"banned", as seen by THIS isolate: skipped
+// until the cool-down ends (their events go to the DO retry queue, which
+// keeps its own cool-down; see RelayPool.enqueueRetry). Same escalation as
+// the DO (nextCooldown); an accept from the relay resets it. Isolates are
+// reused across requests, so this stops the next few publishes re-offending.
+const relayCooldowns = new Map<string, RelayCooldown>();
+
+/** Test hook: forget every isolate-level cool-down. */
+export function resetRelayCooldowns(): void {
+  relayCooldowns.clear();
+}
+
+export const COOLDOWN_SKIP_MESSAGE = "skipped: relay in cool-down";
+
 const HEX64 = /^[0-9a-f]{64}$/i;
 
 const KIND_OBSERVATION = 30500;
@@ -162,45 +191,109 @@ export interface RelayResult {
   message?: string;
 }
 
+// Per-relay timing of one batch, for the publish timing logs.
+export interface RelayBatchTiming {
+  relay: string;
+  /** Upgrade time; null when the relay was skipped or the connect failed. */
+  connect_ms: number | null;
+  total_ms: number;
+  sent: number;
+  accepted: number;
+  /** Why this relay stopped early, if it did (cool-down, throttle, timeout, socket). */
+  stopped?: string;
+}
+
 // Publish a batch of events to one relay over ONE socket: connect (bounded by
-// RELAY_CONNECT_TIMEOUT_MS), send every EVENT frame, then collect the OKs by
-// event id until all have answered or the batch window (batchOkWindowMs)
-// closes. Returns one result per input event, in input order. Events the
-// relay never answered, and every event when the connect or socket fails,
-// come back "rate-limited-retrying" so the caller can queue them for retry.
+// RELAY_CONNECT_TIMEOUT_MS), then send the EVENT frames paced (at most
+// RELAY_MAX_UNACKED unanswered, RELAY_EVENT_GAP_MS apart) and collect the OKs
+// by event id until all have answered or the batch window (batchOkWindowMs)
+// closes. If the relay rate-limits or bans us mid-batch, stop sending, start
+// its cool-down, and hand the rest back for retry. Returns one result per
+// input event, in input order. Events the relay never answered or we never
+// sent, and every event when the connect or socket fails, come back
+// "rate-limited-retrying" so the caller can queue them for retry.
 async function publishBatchToRelay(
   relay: string,
   events: readonly SignedEvent[],
-): Promise<RelayResult[]> {
+): Promise<{ results: RelayResult[]; timing: RelayBatchTiming }> {
+  const started = Date.now();
   const retrying = (message: string): RelayResult => ({
     relay,
     status: "rate-limited-retrying",
     accepted: false,
     message,
   });
+  const finish = (results: RelayResult[], connectMs: number | null, sent: number, stopped?: string) => ({
+    results,
+    timing: {
+      relay,
+      connect_ms: connectMs,
+      total_ms: Date.now() - started,
+      sent,
+      accepted: results.filter((r) => r.accepted).length,
+      ...(stopped ? { stopped } : {}),
+    },
+  });
+
+  if ((relayCooldowns.get(relay)?.until ?? 0) > started) {
+    return finish(events.map(() => retrying(COOLDOWN_SKIP_MESSAGE)), null, 0, "cool-down");
+  }
+
   const httpUrl = relay.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
   let ws: WebSocket | null = null;
+  let connectMs: number | null = null;
+  let sentCount = 0;
   try {
     ws = await connectRelaySocket(httpUrl, RELAY_CONNECT_TIMEOUT_MS);
-    if (!ws) return events.map(() => retrying("relay did not upgrade to WebSocket"));
+    connectMs = Date.now() - started;
+    if (!ws) return finish(events.map(() => retrying("relay did not upgrade to WebSocket")), null, 0, "no-upgrade");
     ws.accept();
 
+    // Send each distinct event once; duplicates share its result.
+    const queue = [...new Map(events.map((e) => [e.id, e])).values()];
     const answered = new Map<string, RelayResult>();
-    const waiting = new Set(events.map((e) => e.id));
+    const inFlight = new Set<string>();
+    let throttled: string | null = null;
     // Resolves with the reason the still-unanswered events get.
     const unansweredReason = await new Promise<string>((resolve) => {
-      const timer = setTimeout(() => resolve("timeout waiting for OK"), batchOkWindowMs(events.length));
-      const done = (reason: string) => {
-        clearTimeout(timer);
+      let next = 0;
+      let lastSentAt = -Infinity;
+      let pumpTimer: ReturnType<typeof setTimeout> | undefined;
+      let finished = false;
+      const deadline = setTimeout(() => done("timeout waiting for OK"), batchOkWindowMs(queue.length));
+      function done(reason: string) {
+        if (finished) return;
+        finished = true;
+        clearTimeout(deadline);
+        if (pumpTimer !== undefined) clearTimeout(pumpTimer);
         resolve(reason);
-      };
+      }
+      function pump() {
+        pumpTimer = undefined;
+        if (finished) return; // a late OK after the deadline sends nothing more
+        while (throttled === null && next < queue.length && inFlight.size < RELAY_MAX_UNACKED) {
+          const wait = lastSentAt + RELAY_EVENT_GAP_MS - Date.now();
+          if (wait > 0) {
+            pumpTimer = setTimeout(pump, wait);
+            return;
+          }
+          const event = queue[next++]!;
+          inFlight.add(event.id);
+          lastSentAt = Date.now();
+          sentCount++;
+          ws!.send(JSON.stringify(["EVENT", event]));
+        }
+        if (inFlight.size === 0 && (throttled !== null || next >= queue.length)) {
+          done(throttled === null ? "" : `not sent: relay rate-limited us (${throttled})`);
+        }
+      }
 
       ws!.addEventListener("message", (ev) => {
         try {
           const msg = JSON.parse(typeof ev.data === "string" ? ev.data : "");
           if (!Array.isArray(msg) || msg[0] !== "OK" || typeof msg[1] !== "string") return;
           const id = msg[1];
-          if (!waiting.delete(id)) return;
+          if (!inFlight.delete(id)) return;
           const ok = msg[2] === true;
           const message = typeof msg[3] === "string" ? msg[3] : "";
           const status: RelayStatus = ok ? "accepted" : classifyRejection(message);
@@ -210,7 +303,13 @@ async function publishBatchToRelay(
             accepted: status === "accepted",
             ...(message ? { message } : {}),
           });
-          if (waiting.size === 0) done("");
+          if (status === "accepted") {
+            relayCooldowns.delete(relay);
+          } else if (status === "rate-limited-retrying" && isRelayThrottle(message) && throttled === null) {
+            throttled = message;
+            relayCooldowns.set(relay, nextCooldown(relayCooldowns.get(relay), Date.now()));
+          }
+          pump();
         } catch {
           // ignore non-JSON / unrelated frames
         }
@@ -218,11 +317,14 @@ async function publishBatchToRelay(
       ws!.addEventListener("close", () => done("socket closed before OK"));
       ws!.addEventListener("error", () => done("socket error"));
 
-      for (const event of events) ws!.send(JSON.stringify(["EVENT", event]));
+      pump();
     });
-    return events.map((e) => answered.get(e.id) ?? retrying(unansweredReason));
+    const results = events.map((e) => answered.get(e.id) ?? retrying(unansweredReason));
+    const stopped = throttled !== null ? "throttled" : unansweredReason ? unansweredReason : undefined;
+    return finish(results, connectMs, sentCount, stopped);
   } catch (err) {
-    return events.map(() => retrying(err instanceof Error ? err.message : String(err)));
+    const message = err instanceof Error ? err.message : String(err);
+    return finish(events.map(() => retrying(message)), connectMs, sentCount, message);
   } finally {
     try { ws?.close(); } catch { /* noop */ }
   }
@@ -234,12 +336,21 @@ async function publishBatchToRelay(
 // their connect timers already running, so opening a socket per (event,
 // relay) turned big batches into spurious connect timeouts. Returns, for each
 // input event in input order, its per-relay results in RELAYS order (the same
-// shape fanOut returns). Each relay is bounded by RELAY_CONNECT_TIMEOUT_MS +
-// batchOkWindowMs(N), so the whole call is too.
-export async function fanOutBatch(events: readonly SignedEvent[]): Promise<RelayResult[][]> {
-  if (events.length === 0) return [];
+// shape fanOut returns), plus each relay's timing. Each relay is bounded by
+// RELAY_CONNECT_TIMEOUT_MS + batchOkWindowMs(N), so the whole call is too.
+export async function fanOutBatchDetailed(
+  events: readonly SignedEvent[],
+): Promise<{ acks: RelayResult[][]; relays: RelayBatchTiming[] }> {
+  if (events.length === 0) return { acks: [], relays: [] };
   const perRelay = await Promise.all(RELAYS.map((relay) => publishBatchToRelay(relay, events)));
-  return events.map((_, i) => perRelay.map((results) => results[i]!));
+  return {
+    acks: events.map((_, i) => perRelay.map((r) => r.results[i]!)),
+    relays: perRelay.map((r) => r.timing),
+  };
+}
+
+export async function fanOutBatch(events: readonly SignedEvent[]): Promise<RelayResult[][]> {
+  return (await fanOutBatchDetailed(events)).acks;
 }
 
 // Publish one event to every relay in parallel: a batch of one, so it is
@@ -258,14 +369,16 @@ export async function enqueueRelayRetries(
   event: SignedEvent,
   results: RelayResult[],
 ): Promise<void> {
-  const retryRelays = results
-    .filter((r) => r.status === "rate-limited-retrying")
-    .map((r) => r.relay);
+  const retry = results.filter((r) => r.status === "rate-limited-retrying");
+  const retryRelays = retry.map((r) => r.relay);
   if (retryRelays.length === 0) return;
+  // Relays that rate-limited or banned us start (or extend) their cool-down
+  // in the DO, so the queue waits it out instead of spending attempts.
+  const throttled = retry.filter((r) => isRelayThrottle(r.message ?? "")).map((r) => r.relay);
   try {
     const stub = env.RELAY_POOL.get(env.RELAY_POOL.idFromName("main"));
     // Pass the SignedEvent as a plain NostrEvent — the DO re-validates id+sig.
-    await stub.enqueueRetry(event, retryRelays);
+    await stub.enqueueRetry(event, retryRelays, throttled);
   } catch (err) {
     console.error("[enqueueRelayRetries] enqueue failed", {
       kind: event.kind,

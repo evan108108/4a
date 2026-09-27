@@ -49,7 +49,7 @@ import {
 import { verifyNip98 } from "./lib/nip98";
 import type { NostrEvent, RelayPool } from "./relay-pool";
 import { enqueueRelayRetries, fanOut, fanOutBatch, rateLimitCheck, type RelayResult } from "./publish";
-import { deliverMemberWraps, DO_CALL_CONCURRENCY } from "./audience";
+import { deliverMemberWraps, DO_CALL_CONCURRENCY, logWrapPublishTiming } from "./audience";
 import { mapWithConcurrency } from "./lib/concurrency";
 
 export type AudienceRawEnv = AuthEnv & KmsEnv & {
@@ -896,6 +896,7 @@ async function runPublishWraps(
   body: PublishWrapsBody,
   env: AudienceRawEnv,
 ): Promise<Response> {
+  const startedAt = Date.now();
   const { audIdPub, slug } = requireAddress(body.audience_address, "audience_address");
   const cached = await lookupDeclarationByAddress(audIdPub, slug, env);
   if (!cached) {
@@ -906,6 +907,8 @@ async function runPublishWraps(
     "publish-wraps",
   );
   if (closed) return closed;
+  const lookupMs = Date.now() - startedAt;
+  const validateStarted = Date.now();
 
   const memberSet = new Set(cached.decl.members.map((m) => m.toLowerCase()));
 
@@ -929,12 +932,13 @@ async function runPublishWraps(
   }
 
   // Same delivery as the custodial path: every wrap is cached first, then
-  // all of them go to the relays in one batch (one socket per relay), with
+  // all of them go to the relays in one paced batch (one socket per relay), with
   // transient relay failures queued for retry. Until 2026-09-27 this was one
   // wrap at a time (a 40-wrap call took ~3.5 min), cached only after a relay
   // accepted, and never retried. `gift_wraps` keeps the request order.
+  const validateMs = Date.now() - validateStarted;
   const stub = env.RELAY_POOL.get(env.RELAY_POOL.idFromName("main"));
-  const delivered = await deliverMemberWraps(
+  const { results: delivered, timing } = await deliverMemberWraps(
     body.gift_wraps.map((w) => ({
       recipient: w.tags.find((t) => t[0] === "p")?.[1] ?? "",
       wrapSigned: w,
@@ -942,6 +946,10 @@ async function runPublishWraps(
     stub,
     env,
   );
+  logWrapPublishTiming("audience/raw/publish-wraps", slug, startedAt, {
+    lookup_ms: lookupMs,
+    validate_ms: validateMs,
+  }, timing);
   const wraps = delivered.map((d) => ({
     recipient: d.recipient,
     event_id: d.event_id,

@@ -93,6 +93,40 @@ const RETRY_MAX_MS = 5 * 60 * 1000;
 const RETRY_MAX_ATTEMPTS = 4;
 const RETRY_JITTER = 0.25;
 const RETRY_PUBLISH_TIMEOUT_MS = 5_000;
+// How many due retry records one alarm tick attempts, and how many keys each
+// storage.list page reads while looking for them.
+const RETRY_BATCH = 50;
+const RETRY_LIST_PAGE = 200;
+// A relay that answers "rate-limited"/"banned" gets a cool-down: its queued
+// retries wait it out without spending attempts, and each worker isolate
+// skips it for new publishes (publish.ts). relay.damus.io bans the gateway's
+// egress for minutes at a time after a burst; retrying at 5-40 s just
+// re-offended and burned all 4 attempts. Repeat offences escalate
+// (see nextCooldown): 5, 10, 20, 40, then 60 min.
+export const RELAY_COOLDOWN_MS = 5 * 60 * 1000;
+export const RELAY_COOLDOWN_MAX_MS = 60 * 60 * 1000;
+const RELAY_COOLDOWN_MAX_LEVEL = 10;
+
+export interface RelayCooldown {
+  /** When the current cool-down ends (epoch ms). */
+  until: number;
+  /** 0 for the first cool-down; +1 per throttle after one has ended. */
+  level: number;
+}
+
+export function cooldownDurationMs(level: number): number {
+  return Math.min(RELAY_COOLDOWN_MAX_MS, RELAY_COOLDOWN_MS * 2 ** level);
+}
+
+// The cool-down after a throttle reply. A throttle while a cool-down is still
+// running changes nothing (one burst yields many throttle replies, and other
+// isolates may not know yet); the first throttle after it has ended escalates
+// one level. An accept from the relay resets it (the caller drops the record).
+export function nextCooldown(prev: RelayCooldown | undefined, now: number): RelayCooldown {
+  if (prev && prev.until > now) return prev;
+  const level = prev ? Math.min(prev.level + 1, RELAY_COOLDOWN_MAX_LEVEL) : 0;
+  return { level, until: now + cooldownDurationMs(level) };
+}
 // Bound on every outbound WebSocket upgrade from this DO (retry publishes,
 // ingest subscriptions, replay). A relay that holds the upgrade (nos.lol's
 // nginx does, for 60 s) must not stall an alarm tick or the sequential
@@ -113,6 +147,7 @@ const ARTIFACT_MANIFEST_KIND = 30540;
 const REVOCATION_KIND = 5;
 const RECONNECT_PREFIX = "reconnect:";
 const RETRY_PREFIX = "retry:";
+const COOLDOWN_PREFIX = "cooldown:";
 // Reverse index: invite_pub → {audIdPub, slug, status}. Maintained by
 // storeAudienceEvent for kind:30520 declarations so the public
 // /v0/audience/by-invite-pub/<pub> route can resolve a declaration without
@@ -235,11 +270,27 @@ function relayHttpUrl(wssUrl: string): string {
   return wssUrl.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
 }
 
+// When a record deferred by a cool-down becomes due: just after it ends, with
+// up to RETRY_BASE_MS of jitter so a relay's queued records don't all land on
+// it in the same instant.
+function afterCooldown(until: number): number {
+  return until <= 0 ? 0 : until + Math.round(Math.random() * RETRY_BASE_MS);
+}
+
 // Exponential backoff with ±RETRY_JITTER multiplicative noise.
 function jitteredBackoff(attempts: number): number {
   const base = Math.min(RETRY_BASE_MS * 2 ** attempts, RETRY_MAX_MS);
   const noise = 1 + (Math.random() * 2 - 1) * RETRY_JITTER;
   return Math.round(base * noise);
+}
+
+// A rejection that means "you're sending too much": the relay wants us to
+// back off, not just retry this one event. Checked on messages already
+// classified transient ("rate-limited-retrying").
+const THROTTLE_PATTERN = /rate[- ]?limit|\bbanned\b|too many|slow down/i;
+
+export function isRelayThrottle(message: string): boolean {
+  return THROTTLE_PATTERN.test(message);
 }
 
 // Classify an OK-false rejection message. Per NIP-01 §4.B, prefixes like
@@ -883,7 +934,10 @@ export class RelayPool extends DurableObject<unknown> {
   // from publish.ts after fan-out completes. Stores one record per (event,
   // relay) pair keyed by `retry:<eventId>:<relay>` so multiple events stack
   // independently. The next alarm fires at the soonest nextAttemptAt.
-  async enqueueRetry(event: NostrEvent, relays: string[]): Promise<void> {
+  // `throttled` relays rate-limited or banned us: they start (or extend)
+  // their cool-down, and every record for a cooling relay is scheduled for
+  // after it.
+  async enqueueRetry(event: NostrEvent, relays: string[], throttled: string[] = []): Promise<void> {
     if (relays.length === 0) return;
     if (!isValidEvent(event)) return;
     if (canonicalEventId(event) !== event.id) return;
@@ -891,11 +945,14 @@ export class RelayPool extends DurableObject<unknown> {
     let earliest = Infinity;
     for (const relay of relays) {
       if (!RELAYS.includes(relay as (typeof RELAYS)[number])) continue;
+      const cooldownUntil = throttled.includes(relay)
+        ? await this.startCooldown(relay, now)
+        : await this.cooldownUntil(relay);
       const key = `${RETRY_PREFIX}${event.id}:${relay}`;
       // Don't re-queue if an attempt is already pending for this pair.
       const existing = await this.ctx.storage.get<RetryRecord>(key);
       if (existing) continue;
-      const nextAttemptAt = now + jitteredBackoff(0);
+      const nextAttemptAt = Math.max(now + jitteredBackoff(0), afterCooldown(cooldownUntil));
       await this.ctx.storage.put(key, { event, attempts: 0, nextAttemptAt });
       if (nextAttemptAt < earliest) earliest = nextAttemptAt;
     }
@@ -914,47 +971,92 @@ export class RelayPool extends DurableObject<unknown> {
     await this.ensureConnected();
   }
 
-  // Walk the retry queue, attempting any record whose nextAttemptAt has
-  // arrived. Returns the count of records processed (regardless of outcome).
-  // Surviving records (still scheduled in the future, or re-queued for next
-  // attempt) reschedule the alarm to their soonest nextAttemptAt. Caps the
-  // batch at 50 to keep a single alarm tick bounded.
+  // Walk the retry queue, attempting up to RETRY_BATCH records whose
+  // nextAttemptAt has arrived. Returns the count attempted (regardless of
+  // outcome). Records for a relay in cool-down are pushed past it without
+  // spending an attempt; a relay that throttles us during the tick starts a
+  // cool-down, so its other due records wait too. Surviving records reschedule
+  // the alarm to their soonest nextAttemptAt.
+  //
+  // The queue is paged: until 2026-09-27 this read only the first 50 keys (by
+  // event id) and skipped the ones not yet due, so 50 future-scheduled
+  // records starved every due record that sorted after them.
   private async processRetries(): Promise<number> {
     const now = Date.now();
-    const list = await this.ctx.storage.list<RetryRecord>({
-      prefix: RETRY_PREFIX,
-      limit: 50,
-    });
+    const cooldowns = new Map<string, number>();
+    const cooldownOf = async (relay: string) => {
+      let until = cooldowns.get(relay);
+      if (until === undefined) {
+        until = await this.cooldownUntil(relay);
+        cooldowns.set(relay, until);
+      }
+      return until;
+    };
 
     let processed = 0;
     let earliest = Infinity;
+    let startAfter: string | undefined;
+    let more = true;
 
-    for (const [key, record] of list.entries()) {
-      if (record.nextAttemptAt > now) {
-        if (record.nextAttemptAt < earliest) earliest = record.nextAttemptAt;
-        continue;
-      }
-      const relay = key.slice(RETRY_PREFIX.length + record.event.id.length + 1);
-      processed++;
-
-      const outcome = await this.publishOnce(relay, record.event);
-      if (outcome === "accepted" || outcome === "failed-permanent") {
-        await this.ctx.storage.delete(key);
-        continue;
-      }
-      // transient: bump attempt count and reschedule (or give up)
-      const nextAttempts = record.attempts + 1;
-      if (nextAttempts >= RETRY_MAX_ATTEMPTS) {
-        await this.ctx.storage.delete(key);
-        continue;
-      }
-      const nextAttemptAt = now + jitteredBackoff(nextAttempts);
-      await this.ctx.storage.put(key, {
-        event: record.event,
-        attempts: nextAttempts,
-        nextAttemptAt,
+    while (more && processed < RETRY_BATCH) {
+      const page = await this.ctx.storage.list<RetryRecord>({
+        prefix: RETRY_PREFIX,
+        limit: RETRY_LIST_PAGE,
+        ...(startAfter !== undefined ? { startAfter } : {}),
       });
-      if (nextAttemptAt < earliest) earliest = nextAttemptAt;
+      more = page.size === RETRY_LIST_PAGE;
+      for (const [key, record] of page.entries()) {
+        startAfter = key;
+        if (record.nextAttemptAt > now) {
+          if (record.nextAttemptAt < earliest) earliest = record.nextAttemptAt;
+          continue;
+        }
+        if (processed >= RETRY_BATCH) {
+          // Due, but over this tick's budget: run again right away.
+          earliest = now;
+          more = false;
+          break;
+        }
+        const relay = key.slice(RETRY_PREFIX.length + record.event.id.length + 1);
+
+        const cooling = await cooldownOf(relay);
+        if (cooling > now) {
+          const deferredTo = afterCooldown(cooling);
+          await this.ctx.storage.put(key, { ...record, nextAttemptAt: deferredTo });
+          if (deferredTo < earliest) earliest = deferredTo;
+          continue;
+        }
+
+        processed++;
+        const outcome = await this.publishOnce(relay, record.event);
+        if (outcome === "accepted" && cooling > 0) {
+          // The relay takes our events again: forget its cool-down history.
+          await this.ctx.storage.delete(`${COOLDOWN_PREFIX}${relay}`);
+          cooldowns.set(relay, 0);
+        }
+        if (outcome === "accepted" || outcome === "failed-permanent") {
+          await this.ctx.storage.delete(key);
+          continue;
+        }
+        // transient: bump attempt count and reschedule (or give up)
+        const nextAttempts = record.attempts + 1;
+        if (nextAttempts >= RETRY_MAX_ATTEMPTS) {
+          await this.ctx.storage.delete(key);
+          continue;
+        }
+        let nextAttemptAt = now + jitteredBackoff(nextAttempts);
+        if (outcome === "throttled") {
+          const until = await this.startCooldown(relay, now);
+          cooldowns.set(relay, until);
+          nextAttemptAt = Math.max(nextAttemptAt, afterCooldown(until));
+        }
+        await this.ctx.storage.put(key, {
+          event: record.event,
+          attempts: nextAttempts,
+          nextAttemptAt,
+        });
+        if (nextAttemptAt < earliest) earliest = nextAttemptAt;
+      }
     }
 
     if (earliest !== Infinity) {
@@ -966,14 +1068,30 @@ export class RelayPool extends DurableObject<unknown> {
     return processed;
   }
 
+  // When the relay's cool-down ends (0 if it has none). An expired record is
+  // kept: it remembers the level, so the next throttle escalates.
+  private async cooldownUntil(relay: string): Promise<number> {
+    return (await this.ctx.storage.get<RelayCooldown>(`${COOLDOWN_PREFIX}${relay}`))?.until ?? 0;
+  }
+
+  // A throttle reply: start, keep, or escalate the cool-down; returns when it ends.
+  private async startCooldown(relay: string, now: number): Promise<number> {
+    const key = `${COOLDOWN_PREFIX}${relay}`;
+    const prev = await this.ctx.storage.get<RelayCooldown>(key);
+    const next = nextCooldown(prev, now);
+    if (next !== prev) await this.ctx.storage.put(key, next);
+    return next.until;
+  }
+
   // Fresh-socket single-event publish, used by the retry queue. Mirrors the
   // shape of publish.ts:publishBatchToRelay but lives inside the DO so we don't
-  // need to plumb a worker-side helper through. Returns one of three
-  // outcomes; the caller decides whether to delete or reschedule.
+  // need to plumb a worker-side helper through. Returns one of four
+  // outcomes ("throttled" = a transient rejection that also asks us to back
+  // off); the caller decides whether to delete or reschedule.
   private async publishOnce(
     relay: string,
     event: NostrEvent,
-  ): Promise<"accepted" | "rate-limited-retrying" | "failed-permanent"> {
+  ): Promise<"accepted" | "rate-limited-retrying" | "throttled" | "failed-permanent"> {
     let ws: WebSocket | null = null;
     try {
       ws = await connectRelaySocket(relayHttpUrl(relay), RELAY_CONNECT_TIMEOUT_MS);
@@ -996,7 +1114,10 @@ export class RelayPool extends DurableObject<unknown> {
               const accepted = data[2] === true;
               const message = typeof data[3] === "string" ? data[3] : "";
               if (accepted) return resolve("accepted");
-              return resolve(classifyRejection(message));
+              const status = classifyRejection(message);
+              return resolve(
+                status === "rate-limited-retrying" && isRelayThrottle(message) ? "throttled" : status,
+              );
             }
           } catch {
             // ignore non-JSON / unrelated frames
